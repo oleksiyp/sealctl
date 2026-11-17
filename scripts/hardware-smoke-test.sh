@@ -25,15 +25,15 @@ y
 EOF
 
 step "4/5 SSH agent signs with the Ledger"
-SOCK=$(mktemp -u /tmp/sealctl-smoke.XXXXXX)
+TMPD=$(mktemp -d); SOCK="$TMPD/agent.sock"
 $S ssh agent --socket "$SOCK" & AGENT=$!
-sleep 1
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$SOCK" ] && break; sleep 0.5; done
 PUB=$(mktemp); $S ssh pubkey > "$PUB"
 echo "signed by the Ledger" > "$PUB.msg"
 SSH_AUTH_SOCK="$SOCK" ssh-keygen -Y sign -f "$PUB" -n smoketest "$PUB.msg" >/dev/null
 printf '%s %s\n' "smoke@test" "$(cat "$PUB")" > "$PUB.allowed"
 ssh-keygen -Y verify -f "$PUB.allowed" -I smoke@test -n smoketest -s "$PUB.msg.sig" < "$PUB.msg"
-kill $AGENT; rm -f "$PUB" "$PUB.msg" "$PUB.msg.sig" "$PUB.allowed" "$SOCK"
+kill $AGENT; rm -rf "$PUB" "$PUB.msg" "$PUB.msg.sig" "$PUB.allowed" "$TMPD"
 
 step "5/5 status"
 $S status

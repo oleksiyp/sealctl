@@ -131,10 +131,18 @@ pub fn run_agent(ctx: Ctx, socket: Option<PathBuf>) -> Result<()> {
     let cert = cert::own()?;
     let key = auth_key(&cert)?;
     let socket = match socket {
-        Some(s) => s,
-        None => socket_path()?,
+        // A caller-chosen location: only make sure the folder exists (it may be /tmp).
+        Some(s) => {
+            std::fs::create_dir_all(s.parent().context("socket dir")?)?;
+            s
+        }
+        // Our own state folder: keep it private to the user.
+        None => {
+            let s = socket_path()?;
+            paths::ensure_private_dir(s.parent().context("socket dir")?)?;
+            s
+        }
     };
-    paths::ensure_private_dir(socket.parent().context("socket dir")?)?;
     let _ = std::fs::remove_file(&socket);
 
     let (tx, rx) = mpsc::channel();
