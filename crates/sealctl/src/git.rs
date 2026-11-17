@@ -1,0 +1,85 @@
+//! Git commit/tag signing with the Ledger authentication key via SSH signatures.
+//!
+//! Git calls `gpg.ssh.program` (normally `ssh-keygen -Y sign`). We point it at
+//! `sealctl git ssh-keygen`, which runs the real `ssh-keygen` with `SSH_AUTH_SOCK` set to the
+//! sealctl agent — so signing works regardless of the shell's SSH_AUTH_SOCK.
+
+use std::process::Command;
+
+use anyhow::{bail, Context, Result};
+
+use crate::{cert, paths, ssh};
+
+fn git_config(scope: &str, key: &str, value: &str) -> Result<()> {
+    let out = Command::new("git")
+        .args(["config", scope, key, value])
+        .output()
+        .context("running git")?;
+    if !out.status.success() {
+        bail!(
+            "git config {key} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+pub fn setup(local: bool) -> Result<()> {
+    let cert = cert::own()?;
+    let line = ssh::public_key_line(&cert)?;
+    let uid = cert::primary_user_id(&cert);
+    let email = uid
+        .split_once('<')
+        .and_then(|(_, r)| r.split_once('>'))
+        .map(|(e, _)| e.to_string())
+        .unwrap_or_else(|| uid.clone());
+
+    // allowed_signers lets `git log --show-signature` verify our own signatures.
+    let allowed = paths::config_dir()?.join("allowed_signers");
+    std::fs::create_dir_all(paths::config_dir()?)?;
+    std::fs::write(&allowed, format!("{email} namespaces=\"git\" {line}\n"))?;
+
+    let exe = std::env::current_exe()?;
+    let scope = if local { "--local" } else { "--global" };
+    git_config(scope, "gpg.format", "ssh")?;
+    git_config(scope, "user.signingkey", &format!("key::{line}"))?;
+    git_config(
+        scope,
+        "gpg.ssh.program",
+        &format!("{} git ssh-keygen", exe.display()),
+    )?;
+    git_config(scope, "gpg.ssh.allowedSignersFile", &allowed.to_string_lossy())?;
+    git_config(scope, "commit.gpgsign", "true")?;
+    git_config(scope, "tag.gpgsign", "true")?;
+    println!(
+        "✅ git ({}) signs commits and tags with your Ledger key",
+        scope.trim_start_matches("--")
+    );
+    println!("   Requires the agent: `sealctl ssh install` (once).");
+    println!("   Add this key on GitHub → Settings → SSH and GPG keys → New SSH key → type *Signing Key*:");
+    println!("   {line}");
+    Ok(())
+}
+
+/// `gpg.ssh.program` shim: exec `ssh-keygen` with our agent socket.
+pub fn ssh_keygen_shim(args: &[String]) -> Result<()> {
+    let sock = ssh::socket_path()?;
+    if !sock.exists() {
+        bail!(
+            "sealctl ssh-agent is not running — start it with `sealctl ssh install` (or `sealctl ssh agent`)"
+        );
+    }
+    let mut cmd = Command::new("ssh-keygen");
+    cmd.args(args).env("SSH_AUTH_SOCK", &sock);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = cmd.exec();
+        bail!("running ssh-keygen: {err}");
+    }
+    #[cfg(not(unix))]
+    {
+        let st = cmd.status()?;
+        std::process::exit(st.code().unwrap_or(1));
+    }
+}

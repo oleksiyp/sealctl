@@ -1,11 +1,12 @@
-//! Device discovery and read-only card inspection.
+//! Device discovery, read-only card inspection, and the overall status overview.
 
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use openpgp_card::ocard::KeyType;
-use openpgp_card::Card;
-use sealctl_ledger::{LedgerBackend, Select};
+use sealctl_ledger::Select;
+
+use crate::device::Ctx;
 
 pub fn devices(select: Select, scan: Duration) -> Result<()> {
     let mut any = false;
@@ -34,28 +35,8 @@ pub fn devices(select: Select, scan: Duration) -> Result<()> {
     Ok(())
 }
 
-/// Connect, check that the OpenPGP app is running, and open it as an OpenPGP card.
-pub fn open_card(select: Select, scan: Duration) -> Result<Card<openpgp_card::state::Open>> {
-    let mut t = sealctl_ledger::open(select, scan)?;
-    let kind = t.kind();
-    let (app, version) =
-        sealctl_ledger::running_app(t.as_mut()).context("asking the Ledger which app is open")?;
-    if app != "OpenPGP" {
-        bail!(
-            "the Ledger is running \"{app}\" — open the OpenPGP app on the device and retry{}",
-            if kind == sealctl_ledger::TransportKind::Ble {
-                " (over Bluetooth this needs the Bluetooth-enabled OpenPGP build)"
-            } else {
-                ""
-            }
-        );
-    }
-    log::info!("connected via {kind}: OpenPGP {version}");
-    Card::new(LedgerBackend::new(t)).context("selecting the OpenPGP application")
-}
-
-pub fn status(select: Select, scan: Duration) -> Result<()> {
-    let mut card = open_card(select, scan)?;
+pub fn status(ctx: &Ctx) -> Result<()> {
+    let mut card = ctx.open_card()?;
     let mut tx = card.transaction()?;
 
     let aid = tx.application_identifier()?;
@@ -140,6 +121,58 @@ pub fn utc_date(secs: u32) -> String {
         rem % 3600 / 60,
         rem % 60
     )
+}
+
+/// `sealctl status`: what's set up and what's unlocked — no device needed.
+pub fn overview() -> Result<()> {
+    match crate::cert::own() {
+        Ok(c) => println!(
+            "Key:       {} {}",
+            crate::cert::fingerprint_hex(&c),
+            crate::cert::primary_user_id(&c)
+        ),
+        Err(_) => println!("Key:       not set up — run `sealctl setup`"),
+    }
+    let vols = crate::volume::Volume::list()?;
+    if vols.is_empty() {
+        println!("Volumes:   none — `sealctl volume create <name> --size 50g`");
+    }
+    for v in vols {
+        let open = v.is_unlocked().unwrap_or(false);
+        let backup = match &v.backup {
+            None => "no backup".to_string(),
+            Some(_) => {
+                let st = crate::backup::load_state(&v.name);
+                match (st.last_success, st.last_error) {
+                    (_, Some(e)) => format!("last backup FAILED: {}", e.lines().next().unwrap_or("")),
+                    (Some(t), None) => format!("backed up {}", crate::backup::age(t)),
+                    (None, None) => "never backed up".into(),
+                }
+            }
+        };
+        println!(
+            "Volume:    {:<12} {} {:<28} {backup}",
+            v.name,
+            if open { "🔓" } else { "🔒" },
+            if open {
+                v.mountpoint.display().to_string()
+            } else {
+                "locked".into()
+            },
+        );
+    }
+    let secrets = crate::secrets::list().map(|l| l.len()).unwrap_or(0);
+    println!("Secrets:   {secrets}");
+    let svc = |label| {
+        if crate::service::is_installed(label) {
+            "installed"
+        } else {
+            "not installed"
+        }
+    };
+    println!("SSH agent: {}", svc(crate::ssh::AGENT_LABEL));
+    println!("Schedule:  {}", svc(crate::backup::SCHEDULE_LABEL));
+    Ok(())
 }
 
 #[cfg(test)]

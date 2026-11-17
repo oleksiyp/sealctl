@@ -15,9 +15,15 @@
 
 - **A compromised computer while a volume is unlocked** — plaintext is accessible to anything
   running as you. Hardware keys protect keys, not unlocked data.
-- **Malware asking the card to decrypt while it's connected and unlocked** — you approve
-  operations on the device, but the device can't show which file is being decrypted. Unplug /
-  disconnect when not in use.
+- **Malware asking the card to decrypt or sign while it's connected** — the OpenPGP app keeps
+  the PIN verified until the app closes or the device locks, and does not ask again per
+  operation. Anything running as you can use the key during that window. Keep a short auto-lock
+  on the Ledger, close the OpenPGP app when you're done, and treat "device connected + app open"
+  like "logged in".
+- **Backup credentials while a volume is unlocked** — the restic password and cloud
+  credentials sit inside the unlocked volume (by design, so scheduled backups need no Ledger).
+  They are as exposed as the volume's own data, no more. Use bucket credentials scoped to the
+  backup bucket and enable object lock / versioning against ransomware.
 - **Loss of the seed and all certificate copies** — unrecoverable by design.
 - **A malicious OpenPGP app build** — when sideloading the Bluetooth build, build it yourself
   from source and compare the hash (see docs/bluetooth-app.md).

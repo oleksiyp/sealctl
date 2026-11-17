@@ -1,0 +1,86 @@
+//! Where sealctl keeps its files. Everything is per-user; nothing secret is stored unencrypted.
+//!
+//! * config  (`~/.config/sealctl`): certificate, volume definitions, encrypted escrow copies
+//! * data    (`~/.local/share/sealctl`): the secret store
+//! * state   (`~/.local/state/sealctl`): sockets, logs
+
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+
+fn home() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("$HOME is not set")
+}
+
+fn xdg(var: &str, fallback: &str) -> Result<PathBuf> {
+    match std::env::var_os(var) {
+        Some(p) if !p.is_empty() => Ok(PathBuf::from(p).join("sealctl")),
+        _ => Ok(home()?.join(fallback).join("sealctl")),
+    }
+}
+
+pub fn config_dir() -> Result<PathBuf> {
+    xdg("XDG_CONFIG_HOME", ".config")
+}
+
+pub fn data_dir() -> Result<PathBuf> {
+    xdg("XDG_DATA_HOME", ".local/share")
+}
+
+pub fn state_dir() -> Result<PathBuf> {
+    xdg("XDG_STATE_HOME", ".local/state")
+}
+
+pub fn keys_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join("keys"))
+}
+
+pub fn volumes_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join("volumes"))
+}
+
+pub fn secrets_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("secrets"))
+}
+
+pub fn ssh_agent_socket() -> Result<PathBuf> {
+    Ok(state_dir()?.join("ssh-agent.sock"))
+}
+
+/// Create a directory (and parents) readable only by the user.
+pub fn ensure_private_dir(p: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(p).with_context(|| format!("creating {}", p.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Write a file readable only by the user (atomic replace).
+pub fn write_private(p: &std::path::Path, data: &[u8]) -> Result<()> {
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = p.with_extension("tmp~");
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts
+            .open(&tmp)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, p).with_context(|| format!("writing {}", p.display()))?;
+    Ok(())
+}

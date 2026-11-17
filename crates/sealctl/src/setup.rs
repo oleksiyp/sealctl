@@ -5,9 +5,8 @@
 //! public certificate — can be recomputed from the device at any time.
 
 use std::fs;
-use std::path::PathBuf;
-use std::time::Duration;
 
+use crate::device::Ctx;
 use anyhow::{bail, Context, Result};
 use openpgp_card::ocard::algorithm::AlgoSimple;
 use openpgp_card::ocard::crypto::PublicKeyMaterial;
@@ -15,9 +14,6 @@ use openpgp_card::ocard::data::KeyGenerationTime;
 use openpgp_card::ocard::KeyType;
 use openpgp_card_rpgp::{bind_into_certificate, public_key_material_and_fp_to_key, public_to_fingerprint};
 use pgp::composed::ArmorOptions;
-use sealctl_ledger::Select;
-
-use crate::card::open_card;
 
 /// Fixed key creation time: 2026-01-01T00:00:00Z. Never change this — it is part of
 /// every fingerprint sealctl has ever produced.
@@ -29,14 +25,6 @@ const KEYS: [(KeyType, &str); 3] = [
     (KeyType::Authentication, "authentication"),
 ];
 
-pub fn config_dir() -> Result<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .context("cannot determine config directory ($HOME unset)")?;
-    Ok(base.join("sealctl"))
-}
-
 fn prompt(msg: &str) -> impl Fn() + '_ {
     move || eprintln!("👉 {msg}")
 }
@@ -45,8 +33,8 @@ fn same_material(a: &PublicKeyMaterial, b: &PublicKeyMaterial) -> bool {
     format!("{a:?}") == format!("{b:?}")
 }
 
-pub fn setup(select: Select, scan: Duration, uid: Option<String>, force: bool) -> Result<()> {
-    let mut card = open_card(select, scan)?;
+pub fn setup(ctx: &Ctx, uid: Option<String>, force: bool) -> Result<()> {
+    let mut card = ctx.open_card()?;
     let mut tx = card.transaction()?;
     let ident = tx.application_identifier()?.ident();
     let uid = uid.unwrap_or_else(|| format!("sealctl ({ident})"));
@@ -130,7 +118,7 @@ pub fn setup(select: Select, scan: Duration, uid: Option<String>, force: bool) -
     let armored = cert.to_armored_string(ArmorOptions::default())?;
 
     // 7. Save certificate + metadata.
-    let dir = config_dir()?.join("keys");
+    let dir = crate::paths::keys_dir()?;
     fs::create_dir_all(&dir)?;
     let cert_path = dir.join(format!("{}.asc", ident.replace(':', "-")));
     fs::write(&cert_path, &armored)?;
