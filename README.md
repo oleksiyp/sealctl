@@ -32,8 +32,8 @@ SSH logins and git commits. Private keys never leave the device.
 | Nix | `nix run github:oleksiyp/sealctl` / `nix profile install github:oleksiyp/sealctl` |
 | From source | `cargo install --git https://github.com/oleksiyp/sealctl sealctl` |
 
-Linux binaries are built on Debian 11 (glibc 2.31) for x86_64 and aarch64 and are
-install-tested on Debian 11/12, Ubuntu 22.04/24.04, Fedora, Rocky 9, openSUSE Tumbleweed and
+Linux binaries are built on Rocky Linux 9 (glibc 2.34) for x86_64 and aarch64 and are
+install-tested on Debian 12/13, Ubuntu 22.04/24.04, Fedora, Rocky 9, openSUSE Tumbleweed and
 Arch on every commit. Backups need [restic](https://restic.net) (`brew`/`apt`/`dnf install
 restic`), Linux volumes need `cryptsetup`. Building from source on Linux needs
 `libudev-dev libdbus-1-dev pkg-config`.

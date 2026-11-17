@@ -27,20 +27,20 @@ jobs:
           - { arch: x86_64, runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
           - { arch: aarch64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
     runs-on: ${{ matrix.runner }}
-    # Debian 11 (glibc 2.31): one binary for Debian 11+, Ubuntu 20.04+, RHEL/Rocky 9, Fedora, Arch
-    container: debian:bullseye
+    # Rocky Linux 9 (glibc 2.34, supported to 2032): one binary for RHEL/Rocky/Alma 9+,
+    # Fedora, Ubuntu 22.04+, Debian 12+, openSUSE and Arch
+    container: rockylinux:9
     steps:
       - name: Toolchain and libraries
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends curl ca-certificates git build-essential \
-            pkg-config libudev-dev libdbus-1-dev dpkg-dev
+          dnf install -y --setopt=install_weak_deps=False gcc pkgconf-pkg-config systemd-devel \
+            dbus-devel git tar gzip findutils
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}-bullseye
+          key: ${{ matrix.target }}-rocky9
       - name: Packaging tools
         run: cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.1
       - name: Build
@@ -93,8 +93,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { image: "debian:11", arch: x86_64, runner: ubuntu-24.04 }
           - { image: "debian:12", arch: x86_64, runner: ubuntu-24.04 }
+          - { image: "debian:13", arch: x86_64, runner: ubuntu-24.04 }
           - { image: "ubuntu:22.04", arch: x86_64, runner: ubuntu-24.04 }
           - { image: "ubuntu:24.04", arch: x86_64, runner: ubuntu-24.04 }
           - { image: "debian:12", arch: aarch64, runner: ubuntu-24.04-arm }

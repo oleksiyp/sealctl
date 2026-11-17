@@ -29,7 +29,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Verified on a Ledger Flex over Bluetooth: decryption, secrets/run, volume unlock, SSH
   signatures (`scripts/hardware-smoke-test.sh`).
 
-- Packages: Homebrew tap formula, .deb and .rpm (x86_64/aarch64, glibc 2.31+), Arch PKGBUILD,
+- Packages: Homebrew tap formula, .deb and .rpm (x86_64/aarch64, glibc 2.34+), Arch PKGBUILD,
   Nix flake, tarballs; all install-tested on CI on every commit.
 
 ### Changed
