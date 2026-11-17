@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-17
+
+Breaking: volumes, backups and secrets now use keys derived from the Ledger seed; there are no
+key files anymore. Volumes from 0.1.0 convert with `sealctl volume rekey <name>`; secrets from
+0.1.0 must be re-added (`sealctl secret set`).
+
+### Added
+- Seed-derived keys (docs/derived-keys.md): volume passphrase from seed + volume UUID, restic
+  password from seed + repository URL, secret-store key from seed. Only the 24 words are needed
+  to recover everything. Pinned test vectors.
+- `sealctl agent`: session cache after one PIN entry; exits after 1 h idle and at most 24 h;
+  `agent status|stop`; `sealctl lock` (all) stops it; one thread per client.
+- `volume import` (register a disk on a new machine), `volume rekey` (convert 0.1.0 volumes).
+- macOS default volume kind is now `apfs-volume` (native volume on the internal disk).
+
+### Removed
+- Per-volume `.key.asc` and `.backup.asc` escrow files; `backup init --existing`.
+- `pass`/`.gpg-id` compatibility of the secret store (now password-encrypted OpenPGP messages).
+
 ## [0.1.0] - 2026-11-17
 
 ### Added
@@ -38,5 +57,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Minimum supported Rust version is 1.89 (required by dependencies).
 - `sealctl status` is now the local overview; card details moved to `sealctl card`.
 
-[Unreleased]: https://github.com/oleksiyp/sealctl/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/oleksiyp/sealctl/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/oleksiyp/sealctl/releases/tag/v0.2.0
 [0.1.0]: https://github.com/oleksiyp/sealctl/releases/tag/v0.1.0

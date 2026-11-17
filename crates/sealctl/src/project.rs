@@ -15,7 +15,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::device::Ctx;
+use crate::derive::Oracle;
 use crate::secrets;
 
 pub const FILE: &str = ".sealctl.toml";
@@ -66,7 +66,7 @@ pub fn mappings(extra: &[String], use_project: bool) -> Result<BTreeMap<String, 
 }
 
 /// Run `argv` with secrets injected into its environment only.
-pub fn run(ctx: &Ctx, extra: &[String], use_project: bool, argv: &[String]) -> Result<()> {
+pub fn run(oracle: &mut dyn Oracle, extra: &[String], use_project: bool, argv: &[String]) -> Result<()> {
     let Some((prog, args)) = argv.split_first() else {
         bail!("no command given — usage: sealctl run [--env NAME=secret] -- <command>");
     };
@@ -78,7 +78,7 @@ pub fn run(ctx: &Ctx, extra: &[String], use_project: bool, argv: &[String]) -> R
     let values = if names.is_empty() {
         vec![]
     } else {
-        secrets::get_many(ctx, &names)?
+        secrets::get_many(oracle, &names)?
     };
 
     let mut cmd = Command::new(prog);
@@ -100,7 +100,7 @@ pub fn run(ctx: &Ctx, extra: &[String], use_project: bool, argv: &[String]) -> R
 }
 
 /// Move a `.env` file into the secret store and write `.sealctl.toml`.
-pub fn import_dotenv(dotenv: &Path, prefix: &str, delete: bool) -> Result<()> {
+pub fn import_dotenv(oracle: &mut dyn Oracle, dotenv: &Path, prefix: &str, delete: bool) -> Result<()> {
     let text = std::fs::read_to_string(dotenv).with_context(|| format!("reading {}", dotenv.display()))?;
     let vars = secrets::parse_dotenv(&text);
     if vars.is_empty() {
@@ -118,7 +118,7 @@ pub fn import_dotenv(dotenv: &Path, prefix: &str, delete: bool) -> Result<()> {
     };
     for (k, v) in &vars {
         let name = format!("{prefix}/{}", k.to_lowercase().replace('_', "-"));
-        secrets::set(&name, v.as_bytes(), true)?;
+        secrets::set(oracle, &name, v.as_bytes(), true)?;
         project.env.insert(k.clone(), name.clone());
         println!("  {k:<28} → {name}");
     }

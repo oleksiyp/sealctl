@@ -1,6 +1,6 @@
 //! Where sealctl keeps its files. Everything is per-user; nothing secret is stored unencrypted.
 //!
-//! * config  (`~/.config/sealctl`): certificate, volume definitions, encrypted escrow copies
+//! * config  (`~/.config/sealctl`): public certificate, volume definitions (no secrets)
 //! * data    (`~/.local/share/sealctl`): the secret store
 //! * state   (`~/.local/state/sealctl`): sockets, logs
 

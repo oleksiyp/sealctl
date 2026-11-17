@@ -12,7 +12,7 @@ keywords = ["openpgp", "ledger", "encryption", "smartcard", "cli"]
 categories = ["command-line-utilities", "cryptography"]
 
 [dependencies]
-sealctl-ledger = { path = "../sealctl-ledger", version = "0.1.0" }
+sealctl-ledger = { path = "../sealctl-ledger", version = "0.2.0" }
 anyhow.workspace = true
 log.workspace = true
 openpgp-card.workspace = true
@@ -32,9 +32,12 @@ rand = "0.8"
 sha2 = "0.10"
 hex = "0.4"
 rpassword = "7"
+hkdf = "0.12"
+num-bigint = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 # ---- Linux packages (built on CI: cargo deb / cargo generate-rpm) ----
 # Shell completions are generated into crates/sealctl/completions/ before packaging.

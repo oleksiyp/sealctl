@@ -1442,6 +1442,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-bigint-dig"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2053,7 +2063,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "sealctl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2061,7 +2071,9 @@ dependencies = [
  "env_logger",
  "getrandom 0.3.4",
  "hex",
+ "hkdf",
  "log",
+ "num-bigint",
  "openpgp-card",
  "openpgp-card-rpgp",
  "pgp",
@@ -2075,12 +2087,13 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "x25519-dalek",
  "zeroize",
 ]
 
 [[package]]
 name = "sealctl-ledger"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "btleplug",

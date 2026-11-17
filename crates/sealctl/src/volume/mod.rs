@@ -1,6 +1,8 @@
-//! Encrypted volumes. The volume passphrase is a random secret, stored only as an OpenPGP
-//! message encrypted to the Ledger (`<name>.key.asc`); it is handed to the OS tool through
-//! stdin and never written anywhere in plaintext.
+//! Encrypted volumes whose passphrase is **derived from the Ledger seed and the volume's UUID**
+//! (see `crate::derive`). No key file exists anywhere: with only the 24 words, any sealctl volume
+//! can be opened again — the UUID is read from the (locked) disk itself.
+//!
+//! The passphrase goes to the OS tool through stdin only and is zeroized afterwards.
 
 pub mod apfs;
 pub mod luks;
@@ -13,15 +15,15 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::device::Ctx;
-use crate::{cert, crypto, paths, util};
+use crate::derive::{self, Oracle, Purpose};
+use crate::paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
-    /// macOS: encrypted APFS disk image in a file (default on macOS).
+    /// macOS: encrypted APFS disk image in a file.
     Sparsebundle,
-    /// macOS: encrypted APFS volume in an existing APFS container (e.g. the internal disk).
+    /// macOS: encrypted APFS volume in an APFS container, e.g. the internal disk (default).
     ApfsVolume,
     /// Linux: LUKS2 container in a file, ext4 inside (default on Linux).
     Luks,
@@ -30,7 +32,7 @@ pub enum Kind {
 impl Kind {
     pub fn default_for_os() -> Kind {
         if cfg!(target_os = "macos") {
-            Kind::Sparsebundle
+            Kind::ApfsVolume
         } else {
             Kind::Luks
         }
@@ -39,6 +41,9 @@ impl Kind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupPolicy {
+    /// restic repository URL — also the input for deriving the repository password.
+    #[serde(default)]
+    pub repository: String,
     /// Back up before `sealctl lock`.
     #[serde(default = "yes")]
     pub on_lock: bool,
@@ -66,9 +71,10 @@ fn d12() -> u32 {
     12
 }
 
-impl Default for BackupPolicy {
-    fn default() -> Self {
+impl BackupPolicy {
+    pub fn new(repository: &str) -> Self {
         Self {
+            repository: repository.to_string(),
             on_lock: true,
             scheduled: true,
             keep_daily: 7,
@@ -78,31 +84,42 @@ impl Default for BackupPolicy {
     }
 }
 
-/// A volume definition, stored in `~/.config/sealctl/volumes/<name>.toml` (no secrets).
+/// A volume definition, stored in `~/.config/sealctl/volumes/<name>.toml`. Contains no secrets
+/// and is only a convenience: `sealctl volume import` recreates it from the disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Volume {
     pub name: String,
     pub kind: Kind,
-    /// Image / container file (sparsebundle, luks) — unused for apfs-volume.
+    /// Image / container file (sparsebundle, luks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
-    /// APFS volume UUID (apfs-volume).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub uuid: Option<String>,
+    /// The volume UUID — input of the key derivation. Empty for legacy volumes (see `rekey`).
+    #[serde(default, alias = "uuid")]
+    pub id: String,
     /// Where the volume is mounted when unlocked.
     pub mountpoint: PathBuf,
-    /// Backup configured (`sealctl backup init`)?
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<BackupPolicy>,
 }
 
-/// Operations each volume kind implements. The passphrase arrives as bytes and must only be
-/// written to the stdin of the OS tool.
+/// Per-kind operations. Passphrases arrive as bytes and must only be written to a tool's stdin.
 pub trait Backend {
-    fn create(&self, v: &mut Volume, size: &str, passphrase: &[u8]) -> Result<()>;
+    /// Create the volume. `key_for(id)` derives the passphrase for a volume id; the backend
+    /// decides the id (generated, or assigned by the OS) and stores it in `v.id`.
+    fn create(
+        &self,
+        v: &mut Volume,
+        size: &str,
+        key_for: &mut dyn FnMut(&str) -> Result<Zeroizing<String>>,
+    ) -> Result<Zeroizing<String>>;
+    /// Read the volume id from the (possibly locked) disk.
+    fn read_id(&self, v: &Volume) -> Result<String>;
     fn unlock(&self, v: &Volume, passphrase: &[u8]) -> Result<()>;
     fn lock(&self, v: &Volume, force: bool) -> Result<()>;
     fn is_unlocked(&self, v: &Volume) -> Result<bool>;
+    fn change_passphrase(&self, v: &Volume, old: &[u8], new: &[u8]) -> Result<()>;
+    /// Permanently delete the encrypted data.
+    fn destroy(&self, v: &Volume) -> Result<()>;
 }
 
 pub fn backend(kind: Kind) -> Box<dyn Backend> {
@@ -130,13 +147,9 @@ impl Volume {
         Ok(paths::volumes_dir()?.join(format!("{name}.toml")))
     }
 
-    pub fn key_file(&self) -> Result<PathBuf> {
+    /// Key file of volumes created before derived keys (removed by `rekey`).
+    pub fn legacy_key_file(&self) -> Result<PathBuf> {
         Ok(paths::volumes_dir()?.join(format!("{}.key.asc", self.name)))
-    }
-
-    /// Encrypted escrow copy of the backup settings (repository, password, credentials).
-    pub fn backup_escrow_file(&self) -> Result<PathBuf> {
-        Ok(paths::volumes_dir()?.join(format!("{}.backup.asc", self.name)))
     }
 
     /// Directory inside the unlocked volume holding its backup settings.
@@ -178,6 +191,10 @@ impl Volume {
     pub fn is_unlocked(&self) -> Result<bool> {
         backend(self.kind).is_unlocked(self)
     }
+
+    pub fn is_legacy(&self) -> bool {
+        self.id.is_empty()
+    }
 }
 
 pub struct CreateOpts {
@@ -193,19 +210,20 @@ fn default_vault_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(std::env::var_os("HOME").context("$HOME")?).join("Vaults"))
 }
 
-/// Create a new volume. The fresh passphrase is escrowed (encrypted to the Ledger) *before*
-/// the volume exists, so a volume can never be created without a recoverable key.
-pub fn create(opts: CreateOpts) -> Result<Volume> {
+fn default_mountpoint(kind: Kind, name: &str) -> Result<PathBuf> {
+    Ok(match kind {
+        Kind::Luks => default_vault_dir()?.join(name),
+        _ => PathBuf::from("/Volumes").join(name),
+    })
+}
+
+/// Create a volume whose passphrase is derived on the Ledger, then mount it with the derived
+/// passphrase — which proves the Ledger-derived key opens it.
+pub fn create(oracle: &mut dyn Oracle, opts: CreateOpts) -> Result<Volume> {
     validate_name(&opts.name)?;
     if Volume::config_file_for(&opts.name)?.exists() {
         bail!("volume '{}' already exists", opts.name);
     }
-    let cert = cert::own()?;
-    let mountpoint = match (&opts.mountpoint, opts.kind) {
-        (Some(m), _) => m.clone(),
-        (None, Kind::Luks) => default_vault_dir()?.join(&opts.name),
-        (None, _) => PathBuf::from("/Volumes").join(&opts.name),
-    };
     let path = match opts.kind {
         Kind::Sparsebundle => Some(
             opts.path
@@ -227,53 +245,32 @@ pub fn create(opts: CreateOpts) -> Result<Volume> {
             fs::create_dir_all(d)?;
         }
     }
+    let mountpoint = match opts.mountpoint {
+        Some(m) => m,
+        None => default_mountpoint(opts.kind, &opts.name)?,
+    };
     let mut vol = Volume {
         name: opts.name.clone(),
         kind: opts.kind,
         path,
-        uuid: opts.container.clone(), // apfs: container until created, then replaced by the volume UUID
+        // apfs-volume: carries the target container until the OS assigns the volume UUID
+        id: opts.container.clone().unwrap_or_default(),
         mountpoint,
         backup: None,
     };
-
-    let passphrase = util::random_secret(32)?;
-    let escrow = crypto::encrypt(std::slice::from_ref(&cert), passphrase.as_bytes(), true)?;
-    paths::ensure_private_dir(&paths::volumes_dir()?)?;
-    paths::write_private(&vol.key_file()?, &escrow)?;
-
     let be = backend(vol.kind);
-    if let Err(e) = be.create(&mut vol, &opts.size, passphrase.as_bytes()) {
-        let _ = fs::remove_file(vol.key_file()?);
-        return Err(e);
-    }
+    let mut key_for = |id: &str| derive::passphrase(oracle, Purpose::Volume, &derive::canonical_id(id));
+    let pass = be.create(&mut vol, &opts.size, &mut key_for)?;
+    vol.id = derive::canonical_id(&vol.id);
     vol.save()?;
-    // Mount right away — we still hold the passphrase, no device round-trip needed.
-    be.unlock(&vol, passphrase.as_bytes())?;
+    be.unlock(&vol, pass.as_bytes())
+        .context("mounting the new volume with its derived key")?;
     Ok(vol)
 }
 
-type Secret = Zeroizing<Vec<u8>>;
-
-/// Decrypt the volume passphrase (and, if needed, the backup settings) on the Ledger.
-fn decrypt_secrets(ctx: &Ctx, vol: &Volume, with_backup: bool) -> Result<(Secret, Option<Secret>)> {
-    let key = fs::read(vol.key_file()?)
-        .with_context(|| format!("missing {}", vol.key_file().unwrap_or_default().display()))?;
-    let backup = if with_backup {
-        fs::read(vol.backup_escrow_file()?).ok()
-    } else {
-        None
-    };
-    let mut items: Vec<&[u8]> = vec![&key];
-    if let Some(b) = &backup {
-        items.push(b);
-    }
-    let mut out = crypto::decrypt_many(ctx, &items)?.into_iter();
-    let pass = out.next().expect("passphrase");
-    Ok((pass, out.next()))
-}
-
-pub fn unlock(ctx: &Ctx, name: &str) -> Result<Volume> {
-    let vol = Volume::load(name)?;
+/// Unlock: read the UUID from the disk, derive the passphrase on the Ledger, unlock.
+pub fn unlock(oracle: &mut dyn Oracle, name: &str) -> Result<Volume> {
+    let mut vol = Volume::load(name)?;
     let be = backend(vol.kind);
     if be.is_unlocked(&vol)? {
         println!(
@@ -283,13 +280,21 @@ pub fn unlock(ctx: &Ctx, name: &str) -> Result<Volume> {
         );
         return Ok(vol);
     }
-    // Restore in-volume backup settings from escrow if they're missing (e.g. after recovery).
-    let needs_backup_restore = vol.backup.is_some();
-    let (pass, backup_cfg) = decrypt_secrets(ctx, &vol, needs_backup_restore)?;
-    be.unlock(&vol, &pass)?;
-    if let Some(cfg) = backup_cfg {
-        crate::backup::ensure_inner_config(&vol, &cfg)?;
+    if vol.is_legacy() {
+        bail!("'{name}' uses a stored key file (older sealctl) — convert it once with `sealctl volume rekey {name}`");
     }
+    // The disk is the source of truth for the id.
+    let disk_id = derive::canonical_id(&be.read_id(&vol)?);
+    if disk_id != vol.id {
+        eprintln!(
+            "note: volume id on disk ({disk_id}) differs from config ({}); using the disk",
+            vol.id
+        );
+        vol.id = disk_id;
+        vol.save()?;
+    }
+    let pass = derive::passphrase(oracle, Purpose::Volume, &vol.id)?;
+    be.unlock(&vol, pass.as_bytes())?;
     println!("🔓 '{}' unlocked at {}", vol.name, vol.mountpoint.display());
     Ok(vol)
 }
@@ -328,28 +333,78 @@ pub fn lock_all(no_backup: bool, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Forget a volume definition. The encrypted data is only removed with `delete_data`.
+/// Forget a volume definition; with `delete_data` also destroy the encrypted data.
 pub fn remove(name: &str, delete_data: bool) -> Result<()> {
     let vol = Volume::load(name)?;
     if vol.is_unlocked()? {
         bail!("lock '{name}' first");
     }
     if delete_data {
-        if let Some(p) = &vol.path {
-            if p.is_dir() {
-                fs::remove_dir_all(p)?;
-            } else if p.exists() {
-                fs::remove_file(p)?;
-            }
+        backend(vol.kind).destroy(&vol)?;
+    }
+    let _ = fs::remove_file(Volume::config_file_for(name)?);
+    let _ = fs::remove_file(vol.legacy_key_file()?);
+    Ok(())
+}
+
+/// Register an existing sealctl volume on this machine (e.g. after recovery from the seed):
+/// a sparsebundle or LUKS file by path, or an APFS volume by UUID.
+pub fn import(name: &str, kind: Kind, target: &str, mountpoint: Option<PathBuf>) -> Result<Volume> {
+    validate_name(name)?;
+    if Volume::config_file_for(name)?.exists() {
+        bail!("volume '{name}' already exists");
+    }
+    let mut vol = Volume {
+        name: name.to_string(),
+        kind,
+        path: None,
+        id: String::new(),
+        mountpoint: match mountpoint {
+            Some(m) => m,
+            None => default_mountpoint(kind, name)?,
+        },
+        backup: None,
+    };
+    match kind {
+        Kind::ApfsVolume => vol.id = target.to_string(),
+        _ => vol.path = Some(fs::canonicalize(target).with_context(|| format!("{target} not found"))?),
+    }
+    vol.id = derive::canonical_id(&backend(kind).read_id(&vol)?);
+    vol.save()?;
+    println!(
+        "✅ imported '{name}' (id {}) — unlock with `sealctl unlock {name}`",
+        vol.id
+    );
+    Ok(vol)
+}
+
+/// Convert a volume from an older sealctl (passphrase in an OpenPGP key file) to a derived key,
+/// then delete the key file.
+pub fn rekey(ctx: &crate::Ctx, oracle: &mut dyn Oracle, name: &str) -> Result<()> {
+    let mut vol = Volume::load(name)?;
+    if !vol.is_legacy() {
+        println!("'{name}' already uses a derived key");
+        return Ok(());
+    }
+    let be = backend(vol.kind);
+    let key_file = vol.legacy_key_file()?;
+    let old = crate::crypto::decrypt(ctx, &fs::read(&key_file).context("legacy key file missing")?)?;
+    match vol.kind {
+        Kind::Sparsebundle => {
+            let id = derive::new_uuid()?;
+            sparsebundle::write_id(&vol, &id)?;
+            vol.id = id;
         }
+        _ => vol.id = derive::canonical_id(&be.read_id(&vol)?),
     }
-    for f in [
-        Volume::config_file_for(name)?,
-        vol.key_file()?,
-        vol.backup_escrow_file()?,
-    ] {
-        let _ = fs::remove_file(f);
-    }
+    let new = derive::passphrase(oracle, Purpose::Volume, &vol.id)?;
+    be.change_passphrase(&vol, &old, new.as_bytes())?;
+    vol.save()?;
+    fs::remove_file(&key_file)?;
+    println!(
+        "✅ '{name}' now uses a key derived from your Ledger seed; {} removed",
+        key_file.display()
+    );
     Ok(())
 }
 

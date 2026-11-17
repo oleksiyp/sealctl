@@ -1,8 +1,9 @@
 //! Secret store for API keys and tokens.
 //!
-//! Layout is compatible with `pass` (passwordstore.org): one OpenPGP-encrypted `<name>.gpg`
-//! file per secret, plus `.gpg-id` naming the key. `pass show <name>` works with GnuPG and the
-//! Ledger over USB. The store is local only (no git) — lost secrets can be re-issued.
+//! One `<name>.gpg` file per secret: a standard OpenPGP message encrypted with a **password
+//! derived from the Ledger seed** (`crate::derive`, purpose "secrets"). Nothing else is needed
+//! to read the store later — only the 24 words. Reading/writing goes through the sealctl agent,
+//! so the PIN is entered once per session. The store is local only (no git).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -12,8 +13,36 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use zeroize::Zeroizing;
 
-use crate::device::Ctx;
-use crate::{cert, crypto, paths};
+use pgp::composed::{Message, MessageBuilder};
+use pgp::crypto::sym::SymmetricKeyAlgorithm;
+use pgp::types::{Password, StringToKey};
+use rand::thread_rng;
+
+use crate::derive::{self, Oracle, Purpose};
+use crate::paths;
+
+/// The store key: derived from the seed, used as the OpenPGP message password.
+fn store_password(oracle: &mut dyn Oracle) -> Result<Zeroizing<String>> {
+    derive::passphrase(oracle, Purpose::Secrets, "store")
+}
+
+fn seal(password: &str, value: &[u8]) -> Result<Vec<u8>> {
+    let mut b =
+        MessageBuilder::from_bytes("", value.to_vec()).seipd_v1(thread_rng(), SymmetricKeyAlgorithm::AES256);
+    b.encrypt_with_password(StringToKey::new_default(thread_rng()), &Password::from(password))?;
+    Ok(b.to_vec(thread_rng())?)
+}
+
+fn open(password: &str, blob: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let msg = Message::from_bytes(blob)?;
+    let mut m = msg
+        .decrypt_with_password(&Password::from(password))
+        .context("cannot decrypt — a different Ledger seed?")?;
+    if m.is_compressed() {
+        m = m.decompress()?;
+    }
+    Ok(Zeroizing::new(m.as_data_vec()?))
+}
 
 pub fn store_dir() -> Result<PathBuf> {
     paths::secrets_dir()
@@ -38,22 +67,17 @@ fn path_of(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.gpg"))
 }
 
-/// Store `value` under `name` (encrypted to the user's certificate).
-pub fn set(name: &str, value: &[u8], overwrite: bool) -> Result<()> {
+/// Store `value` under `name`.
+pub fn set(oracle: &mut dyn Oracle, name: &str, value: &[u8], overwrite: bool) -> Result<()> {
     validate(name)?;
     let dir = store_dir()?;
     paths::ensure_private_dir(&dir)?;
-    let cert = cert::own()?;
-    let gpg_id = dir.join(".gpg-id");
-    if !gpg_id.exists() {
-        fs::write(&gpg_id, format!("{}\n", cert::fingerprint_hex(&cert)))?;
-    }
     let p = path_of(&dir, name);
     if p.exists() && !overwrite {
         bail!("secret {name} exists — use --force to replace it");
     }
-    let ct = crypto::encrypt(std::slice::from_ref(&cert), value, false)?;
-    paths::write_private(&p, &ct)
+    let pw = store_password(oracle)?;
+    paths::write_private(&p, &seal(&pw, value)?)
 }
 
 /// Read a value for `set`: from stdin when piped, otherwise a hidden prompt.
@@ -77,8 +101,8 @@ pub fn exists(name: &str) -> Result<bool> {
     Ok(path_of(&store_dir()?, name).exists())
 }
 
-/// Decrypt several secrets with one device session.
-pub fn get_many(ctx: &Ctx, names: &[&str]) -> Result<Vec<Zeroizing<String>>> {
+/// Decrypt several secrets (one store key, so at most one device round-trip).
+pub fn get_many(oracle: &mut dyn Oracle, names: &[&str]) -> Result<Vec<Zeroizing<String>>> {
     let dir = store_dir()?;
     let blobs: Vec<Vec<u8>> = names
         .iter()
@@ -87,19 +111,23 @@ pub fn get_many(ctx: &Ctx, names: &[&str]) -> Result<Vec<Zeroizing<String>>> {
             fs::read(path_of(&dir, n)).with_context(|| format!("secret {n} not found"))
         })
         .collect::<Result<_>>()?;
-    let refs: Vec<&[u8]> = blobs.iter().map(|b| b.as_slice()).collect();
-    crypto::decrypt_many(ctx, &refs)?
-        .into_iter()
+    if blobs.is_empty() {
+        return Ok(vec![]);
+    }
+    let pw = store_password(oracle)?;
+    blobs
+        .iter()
         .zip(names)
-        .map(|(v, n)| {
+        .map(|(b, n)| {
+            let v = open(&pw, b)?;
             let s = String::from_utf8(v.to_vec()).with_context(|| format!("secret {n} is not UTF-8"))?;
             Ok(Zeroizing::new(s))
         })
         .collect()
 }
 
-pub fn get(ctx: &Ctx, name: &str) -> Result<Zeroizing<String>> {
-    Ok(get_many(ctx, &[name])?.pop().expect("one"))
+pub fn get(oracle: &mut dyn Oracle, name: &str) -> Result<Zeroizing<String>> {
+    Ok(get_many(oracle, &[name])?.pop().expect("one"))
 }
 
 pub fn list() -> Result<Vec<String>> {

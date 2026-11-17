@@ -18,36 +18,48 @@ fn unique(prefix: &str) -> String {
 
 #[allow(dead_code)]
 fn lifecycle(kind: Kind, mount_in_tmp: bool) {
-    let (sk, pk) = common::software_key();
+    let (_sk, pk) = common::software_key();
     let tmp = tempfile::tempdir().unwrap();
     common::isolated_home(tmp.path(), &pk);
+    let mut ledger = common::SoftOracle::fixed();
     let name = unique("sct");
 
-    // create (escrows the key, creates, mounts)
+    // create: passphrase derived from the "seed" + a fresh volume id, then mounted with it
     let mountpoint = mount_in_tmp.then(|| tmp.path().join("mnt").join(&name));
-    let vol = volume::create(volume::CreateOpts {
-        name: name.clone(),
-        kind,
-        size: "64m".into(),
-        path: Some(tmp.path().join(if kind == Kind::Luks {
-            "v.luks"
-        } else {
-            "v.sparsebundle"
-        })),
-        container: None,
-        mountpoint,
-    })
+    let image = tmp.path().join(if kind == Kind::Luks {
+        "v.luks"
+    } else {
+        "v.sparsebundle"
+    });
+    let vol = volume::create(
+        &mut ledger,
+        volume::CreateOpts {
+            name: name.clone(),
+            kind,
+            size: "64m".into(),
+            path: Some(image.clone()),
+            container: None,
+            mountpoint: mountpoint.clone(),
+        },
+    )
     .expect("create volume");
     assert!(vol.is_unlocked().unwrap(), "mounted after create");
+    assert_eq!(vol.id.len(), 36, "volume id is a UUID");
+    // nothing secret was written next to the config
+    let leftovers: Vec<_> = fs::read_dir(sealctl::paths::volumes_dir().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.ends_with(".toml"))
+        .collect();
+    assert!(leftovers.is_empty(), "no key files: {leftovers:?}");
     fs::write(vol.mountpoint.join("hello.txt"), b"hello from sealctl").unwrap();
 
-    // backups to a local restic repository
+    // backups: restic password derived from the repository URL
     let have_restic = common::have("restic");
+    let repo = tmp.path().join("repo").to_string_lossy().into_owned();
     if have_restic {
-        let repo = tmp.path().join("repo");
-        sealctl::backup::init(&name, &repo.to_string_lossy(), &[], false).expect("backup init");
-        assert!(vol.inner_dir().join("restic-password").exists());
-        assert!(vol.backup_escrow_file().unwrap().exists());
+        sealctl::backup::init(&mut ledger, &name, &repo, &[]).expect("backup init");
         sealctl::backup::run(std::slice::from_ref(&name), false, false, true).expect("backup run");
         let st = sealctl::backup::load_state(&name);
         assert!(st.last_success.is_some() && st.last_error.is_none());
@@ -57,35 +69,33 @@ fn lifecycle(kind: Kind, mount_in_tmp: bool) {
 
     // lock (runs the on-lock backup)
     volume::lock(&name, false, false).expect("lock");
-    let vol = Volume::load(&name).unwrap();
-    assert!(!vol.is_unlocked().unwrap(), "locked");
+    assert!(!Volume::load(&name).unwrap().is_unlocked().unwrap(), "locked");
 
-    // wrong passphrase must fail
-    let be = backend(kind);
-    assert!(
-        be.unlock(&vol, b"wrong-passphrase").is_err(),
-        "wrong passphrase rejected"
-    );
+    // a different seed cannot open it
+    let mut other = common::SoftOracle(x25519_dalek::StaticSecret::from([9u8; 32]));
+    assert!(volume::unlock(&mut other, &name).is_err(), "other seed rejected");
 
-    // unlock with the escrowed key (decrypted by the "card")
-    let pass = common::decrypt(&sk, &fs::read(vol.key_file().unwrap()).unwrap());
-    be.unlock(&vol, &pass).expect("unlock with escrowed key");
+    // forget everything on this machine except the disk, then recover from "seed" + disk
+    volume::remove(&name, false).unwrap();
+    let target = image.to_string_lossy().into_owned();
+    volume::import(&name, kind, &target, mountpoint).expect("import from disk");
+    let vol = volume::unlock(&mut ledger, &name).expect("unlock with the seed-derived key");
     assert_eq!(
         fs::read(vol.mountpoint.join("hello.txt")).unwrap(),
         b"hello from sealctl"
     );
 
-    // escrowed backup settings can restore in-volume config if it got lost
+    // re-init backups with the same URL reconnects to the same repository (same derived password)
     if have_restic {
         fs::remove_dir_all(vol.inner_dir()).unwrap();
-        let escrow = common::decrypt(&sk, &fs::read(vol.backup_escrow_file().unwrap()).unwrap());
-        sealctl::backup::ensure_inner_config(&vol, &escrow).unwrap();
+        sealctl::backup::init(&mut ledger, &name, &repo, &[]).expect("reconnect to existing repo");
         sealctl::backup::run(std::slice::from_ref(&name), false, false, true)
-            .expect("backup after restore of config");
+            .expect("backup after reconnect");
     }
 
     volume::lock(&name, true, true).expect("final lock");
     volume::remove(&name, true).unwrap();
+    assert!(!image.exists(), "data deleted");
 }
 
 #[cfg(target_os = "macos")]
@@ -156,22 +166,32 @@ fn macos_apfs_volume_backend() {
         name: name.clone(),
         kind: Kind::ApfsVolume,
         path: None,
-        uuid: Some(container.clone()),
+        id: container.clone(),
         mountpoint: std::path::Path::new("/Volumes").join(&name),
         backup: None,
     };
     let be = backend(Kind::ApfsVolume);
+    let mut ledger = common::SoftOracle::fixed();
     let res = (|| -> anyhow::Result<()> {
-        be.create(&mut v, "", b"apfs-test-passphrase")?;
-        assert!(
-            v.uuid.as_deref().is_some_and(|u| u.len() == 36),
-            "volume UUID recorded"
+        use sealctl::derive::{canonical_id, passphrase, Purpose};
+        // created with a temporary passphrase, then switched to the one derived from its UUID
+        let mut key_for = |id: &str| passphrase(&mut ledger, Purpose::Volume, &canonical_id(id));
+        let pass = be.create(&mut v, "", &mut key_for)?;
+        assert_eq!(v.id.len(), 36, "volume UUID recorded");
+        assert_eq!(
+            be.read_id(&v)?.to_lowercase(),
+            v.id.to_lowercase(),
+            "UUID readable while locked"
         );
-        be.unlock(&v, b"apfs-test-passphrase")?;
+        be.unlock(&v, pass.as_bytes())?;
         assert!(be.is_unlocked(&v)?);
         be.lock(&v, false)?;
         assert!(!be.is_unlocked(&v)?);
         assert!(be.unlock(&v, b"nope").is_err());
+        // re-derived from the UUID alone
+        let again = passphrase(&mut ledger, Purpose::Volume, &canonical_id(&v.id))?;
+        be.unlock(&v, again.as_bytes())?;
+        be.lock(&v, false)?;
         Ok(())
     })();
     let _ = Command::new("hdiutil")

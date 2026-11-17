@@ -15,6 +15,14 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    pub fn transport_name(&self) -> &'static str {
+        match self.select {
+            Select::Auto => "auto",
+            Select::Usb => "usb",
+            Select::Ble => "ble",
+        }
+    }
+
     /// Connect, check that the OpenPGP app is running, and open it as an OpenPGP card.
     pub fn open_card(&self) -> Result<Card<Open>> {
         let mut t = sealctl_ledger::open(self.select, self.scan)?;

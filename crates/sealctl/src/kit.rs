@@ -12,25 +12,21 @@ use crate::{cert, paths};
 const README: &str = r#"sealctl recovery kit
 ====================
 
-Everything here is either public or encrypted to your Ledger's OpenPGP key.
-You also need: your 24-word recovery phrase (and nothing else).
+Strictly, you only need your 24-word recovery phrase: every sealctl key is derived from it.
+This kit adds convenience (your public certificate and the list of your volumes).
 
-1. Restore the 24 words on a Ledger, install the OpenPGP app (Ledger Live → developer
-   mode), open it.
-2. Recreate the keys (they are derived from the seed, so they come back identical):
-     sealctl kit import <this folder>
+1. Restore the 24 words on a Ledger, install the OpenPGP app (Ledger Live → developer mode),
+   open it.
+2. Recreate the keys (identical, they come from the seed):
+     sealctl kit import <this folder>      # optional: certificate + volume list
      sealctl setup --force
-   Without sealctl, with GnuPG instead:
-     gpg --import keys/*.asc
-     gpg --card-status            # links the card keys to the certificate
-3. Decrypt a volume passphrase or backup password with any OpenPGP tool, e.g.
-     gpg -d volumes/<name>.key.asc
-     gpg -d volumes/<name>.backup.asc
-4. Restore a backup with restic:
-     gpg -d volumes/<name>.backup.asc      # shows RESTIC_REPOSITORY, password and credentials
-     restic -r <repository> restore latest --target ./restore
+3. Volumes: plug in the disk, then (if not imported above)
+     sealctl volume import <name> <image path or APFS volume UUID> --kind <kind>
+     sealctl unlock <name>
+4. Backups: sealctl backup init <volume> --repo <same repository URL>   # reconnects
+   or list/restore directly: sealctl backup snapshots <volume>
 
-Key creation time is fixed at 2026-01-01T00:00:00Z, so fingerprints never change.
+How the keys are derived: https://github.com/oleksiyp/sealctl/blob/main/docs/derived-keys.md
 "#;
 
 pub fn export(dir: &Path) -> Result<()> {
@@ -54,8 +50,8 @@ pub fn export(dir: &Path) -> Result<()> {
         for e in rd.flatten() {
             let p = e.path();
             let name = p.file_name().context("name")?.to_string_lossy().into_owned();
-            // volume definitions (.toml) and OpenPGP-encrypted escrow files (.asc) only
-            if name.ends_with(".toml") || name.ends_with(".asc") {
+            // volume definitions (.toml): names, kinds and ids — no secrets
+            if name.ends_with(".toml") {
                 fs::copy(&p, dir.join("volumes").join(&name))?;
                 n += 1;
             }

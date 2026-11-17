@@ -2,19 +2,20 @@
 
 Thanks for helping! A few ground rules keep this tool trustworthy.
 
-## The one hard rule: no custom cryptography
+## The hard rule: no new cryptography
 
-`sealctl` must never implement or invent cryptographic constructions. Encryption, signatures,
-key derivation and key formats come from established components (Ledger OpenPGP app,
-`openpgp-card`, rPGP, APFS, LUKS2, restic). Pull requests that add new constructions will be
-declined, however well-meant. Transport, orchestration, UX and docs are all fair game.
+`sealctl` uses established components (Ledger OpenPGP app, `openpgp-card`, rPGP, APFS, LUKS2,
+restic). It has exactly **one** custom construction — the seed-derived keys in
+`crates/sealctl/src/derive.rs`, specified in `docs/derived-keys.md` and pinned by test vectors
+that must never change. Pull requests that add further constructions or alter the derivation
+will be declined, however well-meant. Transport, orchestration, UX and docs are all fair game.
 
 Other rules for security-sensitive code:
 
 - Secrets go to child processes via stdin or inherited file descriptors — never arguments or
   environment variables visible to other users.
 - Zeroize secret buffers when done; never log them, even at trace level.
-- Every file written must be readable with standard tools; document how in `docs/recovery.md`.
+- Never add files that must be backed up: everything must be recoverable from the 24 words.
 
 ## Development
 

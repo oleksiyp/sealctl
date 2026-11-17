@@ -42,7 +42,7 @@ pub fn isolated_home(root: &Path, pk: &SignedPublicKey) {
     std::fs::write(keys.join("TEST.asc"), armored).unwrap();
 }
 
-/// Decrypt an escrow file with the software key (what the Ledger does in real use).
+/// Decrypt an OpenPGP message with the software key (what the Ledger does in real use).
 pub fn decrypt(sk: &SignedSecretKey, data: &[u8]) -> Vec<u8> {
     let (msg, _) = Message::from_armor(data).unwrap();
     let mut m = msg.decrypt(&"".into(), sk).unwrap();
@@ -54,4 +54,22 @@ pub fn decrypt(sk: &SignedSecretKey, data: &[u8]) -> Vec<u8> {
 
 pub fn have(bin: &str) -> bool {
     sealctl::util::which(bin)
+}
+
+/// Software stand-in for the Ledger's X25519 decryption key.
+pub struct SoftOracle(pub x25519_dalek::StaticSecret);
+
+impl SoftOracle {
+    pub fn fixed() -> Self {
+        SoftOracle(x25519_dalek::StaticSecret::from([7u8; 32]))
+    }
+}
+
+impl sealctl::derive::Oracle for SoftOracle {
+    fn x25519(&mut self, u: &[u8; 32]) -> anyhow::Result<[u8; 32]> {
+        Ok(self
+            .0
+            .diffie_hellman(&x25519_dalek::PublicKey::from(*u))
+            .to_bytes())
+    }
 }

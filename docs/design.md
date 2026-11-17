@@ -31,12 +31,15 @@ The Ledger OpenPGP app derives keys from the device seed (BIP32 path
 
 `sealctl doctor` re-derives the certificate from the device and compares fingerprints.
 
-## Secret flow
+## Derived keys and the agent
 
-A volume passphrase is a random value stored as a standard OpenPGP message encrypted to the
-card's decryption key. To unlock, `sealctl` decrypts it on the card and writes it directly into
-the stdin of `diskutil` / `cryptsetup` / `restic`; it is never passed as an argument or an
-environment variable and is zeroized afterwards.
+Volume passphrases, restic passwords and the secret-store key are derived on the Ledger from
+its seed-derived X25519 key and a public id — see [derived-keys.md](derived-keys.md). Derived
+values go to OS tools through stdin only and are zeroized after use.
+
+`sealctl agent` (started on demand, one thread per client, 0600 Unix socket) caches the card's
+X25519 results so a session needs one PIN entry. It exits after 1 h idle or 24 h total;
+`sealctl lock` stops it.
 
 ## Transports
 
@@ -49,21 +52,21 @@ environment variable and is zeroized afterwards.
 
 ## Backups
 
-* `backup init` creates a random restic password; it and the repository credentials are written
-  (0600) to `<mount>/.sealctl/` and, encrypted to the card, to
-  `~/.config/sealctl/volumes/<name>.backup.asc`.
+* `backup init` derives the restic password from the repository URL; it and the repository
+  credentials are cached (0600) in `<mount>/.sealctl/`. Re-running `init` with the same URL
+  reconnects to an existing repository.
 * `backup run --all --if-unlocked` (launchd `StartInterval` / systemd timer) backs up every
   unlocked volume with `RESTIC_PASSWORD_FILE` pointing inside the volume — no device needed.
 * `lock` runs the same backup first; a failed backup never prevents locking.
-* `snapshots` / `restore` / `check` decrypt the escrow copy on the Ledger when the volume is
-  locked and give restic the password through a stdin pipe.
+* `snapshots` / `restore` / `check` derive the password on the Ledger when the volume is locked
+  (credentials from the environment or a prompt) and give it to restic through a stdin pipe.
 * Retention (`forget --prune`, 7 daily / 4 weekly / 12 monthly by default) runs at most weekly.
 
 ## Secrets
 
-`pass`-compatible store in `~/.local/share/sealctl/secrets` (binary OpenPGP, `.gpg-id`).
-`sealctl run` decrypts all mapped secrets in one device session and `exec`s the command with
-them in its environment only.
+`~/.local/share/sealctl/secrets/<name>.gpg`: OpenPGP messages (SKESK + SEIPD, AES-256)
+encrypted with the seed-derived store key. `sealctl run` decrypts all mapped secrets with one
+key derivation and `exec`s the command with them in its environment only.
 
 ## SSH
 
@@ -74,7 +77,6 @@ released) and calls INTERNAL AUTHENTICATE with the Ed25519 authentication key. G
 
 ## Recovery
 
-Everything needed is standard: the seed (24 words), the certificate, the OpenPGP-encrypted
-passphrase files, and restic repositories. `gpg` with the official OpenPGP app over USB can
-decrypt every file `sealctl` writes. `sealctl kit export` writes a recovery kit with step-by-step
+Only the seed (24 words) is needed: `sealctl setup --force` recreates the identical keys and
+certificate; volumes, backups and secrets are re-derived. `sealctl kit export` writes a recovery kit with step-by-step
 instructions (`README.txt`) for both sealctl and plain GnuPG + restic.

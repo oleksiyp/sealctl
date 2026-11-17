@@ -1,14 +1,24 @@
 //! macOS encrypted APFS sparse bundle (`hdiutil`). No admin rights needed; the image is a
-//! folder of 8 MB bands, so it also syncs/copies efficiently.
+//! folder of 8 MB bands. sealctl stores the volume id in `<bundle>/sealctl.id` (plaintext,
+//! not secret) so the derived key can be recomputed from the bundle alone.
 
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use zeroize::Zeroizing;
 
 use super::{Backend, Volume};
+use crate::derive;
 use crate::util::{check, run_with_stdin};
 
 pub struct Sparsebundle;
+
+const ID_FILE: &str = "sealctl.id";
+
+pub fn write_id(v: &Volume, id: &str) -> Result<()> {
+    let path = v.path.as_ref().context("sparsebundle needs a path")?;
+    std::fs::write(path.join(ID_FILE), format!("{id}\n")).context("writing the volume id into the bundle")
+}
 
 /// Mount points of attached images whose image-path equals `path` (from `hdiutil info`).
 pub fn attached_mounts(path: &std::path::Path) -> Result<Vec<String>> {
@@ -39,8 +49,15 @@ pub fn attached_mounts(path: &std::path::Path) -> Result<Vec<String>> {
 }
 
 impl Backend for Sparsebundle {
-    fn create(&self, v: &mut Volume, size: &str, passphrase: &[u8]) -> Result<()> {
-        let path = v.path.as_ref().context("sparsebundle needs a path")?;
+    fn create(
+        &self,
+        v: &mut Volume,
+        size: &str,
+        key_for: &mut dyn FnMut(&str) -> Result<Zeroizing<String>>,
+    ) -> Result<Zeroizing<String>> {
+        let path = v.path.clone().context("sparsebundle needs a path")?;
+        let id = derive::new_uuid()?;
+        let pass = key_for(&id)?;
         let out = run_with_stdin(
             Command::new("hdiutil")
                 .args([
@@ -54,11 +71,20 @@ impl Backend for Sparsebundle {
                     "APFS",
                 ])
                 .args(["-encryption", "AES-256", "-stdinpass", "-volname", &v.name])
-                .arg(path),
-            passphrase,
+                .arg(&path),
+            pass.as_bytes(),
         )?;
         check(out, "hdiutil create")?;
-        Ok(())
+        v.id = id.clone();
+        write_id(v, &id)?;
+        Ok(pass)
+    }
+
+    fn read_id(&self, v: &Volume) -> Result<String> {
+        let path = v.path.as_ref().context("sparsebundle needs a path")?;
+        let id = std::fs::read_to_string(path.join(ID_FILE))
+            .with_context(|| format!("{} has no {ID_FILE} — not a sealctl volume?", path.display()))?;
+        Ok(id.trim().to_string())
     }
 
     fn unlock(&self, v: &Volume, passphrase: &[u8]) -> Result<()> {
@@ -73,7 +99,7 @@ impl Backend for Sparsebundle {
         cmd.arg(path);
         check(
             run_with_stdin(&mut cmd, passphrase)?,
-            "hdiutil attach (wrong passphrase?)",
+            "hdiutil attach (wrong key?)",
         )?;
         if !self.is_unlocked(v)? {
             bail!("image attached but not mounted at {}", v.mountpoint.display());
@@ -97,5 +123,32 @@ impl Backend for Sparsebundle {
         Ok(attached_mounts(path)?
             .iter()
             .any(|m| super::same_path(std::path::Path::new(m), &v.mountpoint)))
+    }
+
+    fn change_passphrase(&self, v: &Volume, old: &[u8], new: &[u8]) -> Result<()> {
+        let path = v.path.as_ref().context("sparsebundle needs a path")?;
+        let mut input = Zeroizing::new(Vec::with_capacity(old.len() + new.len() + 2));
+        input.extend_from_slice(old);
+        input.push(0);
+        input.extend_from_slice(new);
+        input.push(0);
+        check(
+            run_with_stdin(
+                Command::new("hdiutil")
+                    .args(["chpass", "-oldstdinpass", "-newstdinpass"])
+                    .arg(path),
+                &input,
+            )?,
+            "hdiutil chpass",
+        )?;
+        Ok(())
+    }
+
+    fn destroy(&self, v: &Volume) -> Result<()> {
+        let path = v.path.as_ref().context("sparsebundle needs a path")?;
+        if path.exists() {
+            std::fs::remove_dir_all(path)?;
+        }
+        Ok(())
     }
 }

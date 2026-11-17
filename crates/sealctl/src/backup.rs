@@ -1,10 +1,11 @@
 //! Encrypted, versioned backups of volumes with restic.
 //!
 //! How it works without a daemon:
-//! * the restic password and repository credentials live **inside the encrypted volume**
-//!   (`<mount>/.sealctl/`), so they are readable exactly while the volume is unlocked;
-//! * an OpenPGP-encrypted escrow copy (`~/.config/sealctl/volumes/<name>.backup.asc`) allows
-//!   restores when the volume is locked or lost (decrypted on the Ledger);
+//! * the restic password is **derived from the Ledger seed and the repository URL**
+//!   (`crate::derive`, purpose "restic") — nothing to back up; with the 24 words and the
+//!   repository URL you can always open the repository again;
+//! * a cached copy of the password and the storage credentials live **inside the encrypted
+//!   volume** (`<mount>/.sealctl/`), readable exactly while the volume is unlocked;
 //! * a scheduled job runs `sealctl backup run --all --if-unlocked` (no Ledger needed), and
 //!   `sealctl lock` runs a final backup before unmounting.
 
@@ -18,11 +19,11 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::device::Ctx;
+use crate::derive::{self, Oracle, Purpose};
 use crate::volume::{BackupPolicy, Volume};
-use crate::{cert, crypto, paths, util};
+use crate::{paths, util};
 
-/// Everything restic needs. Secret: stored only inside the volume and encrypted in escrow.
+/// Everything restic needs. Secret: stored only inside the encrypted volume.
 #[derive(Serialize, Deserialize)]
 pub struct RepoSecrets {
     pub repository: String,
@@ -94,15 +95,6 @@ fn write_inner(vol: &Volume, s: &RepoSecrets) -> Result<()> {
     Ok(())
 }
 
-/// Called on unlock with the decrypted escrow: recreate in-volume settings if missing.
-pub fn ensure_inner_config(vol: &Volume, escrow_plain: &[u8]) -> Result<()> {
-    if inner_secrets_file(vol).exists() && inner_password_file(vol).exists() {
-        return Ok(());
-    }
-    let s: RepoSecrets = toml::from_str(std::str::from_utf8(escrow_plain)?)?;
-    write_inner(vol, &s)
-}
-
 fn read_inner(vol: &Volume) -> Result<RepoSecrets> {
     let text = Zeroizing::new(fs::read_to_string(inner_secrets_file(vol)).with_context(|| {
         format!(
@@ -132,18 +124,31 @@ impl Repo {
         })
     }
 
-    /// Works while locked too: decrypt the escrow copy on the Ledger.
-    fn open(ctx: &Ctx, vol: &Volume) -> Result<Repo> {
+    /// Works while locked or lost too: the password is derived on the Ledger from the
+    /// repository URL; storage credentials come from the environment or a prompt.
+    fn open(oracle: &mut dyn Oracle, vol: &Volume) -> Result<Repo> {
         if vol.is_unlocked().unwrap_or(false) && inner_secrets_file(vol).exists() {
             return Self::from_unlocked(vol);
         }
-        let escrow = fs::read(vol.backup_escrow_file()?).context("no backup configured for this volume")?;
-        let plain = crypto::decrypt(ctx, &escrow)?;
-        let secrets: RepoSecrets = toml::from_str(std::str::from_utf8(&plain)?)?;
-        let pw = Zeroizing::new(secrets.password.clone());
+        let repository = vol
+            .backup
+            .as_ref()
+            .map(|b| b.repository.clone())
+            .filter(|r| !r.is_empty())
+            .context("no backup configured for this volume")?;
+        Self::from_url(oracle, &repository)
+    }
+
+    fn from_url(oracle: &mut dyn Oracle, repository: &str) -> Result<Repo> {
+        let password = derive::passphrase(oracle, Purpose::Restic, repository)?;
+        let env = collect_env(repository, &[])?;
         Ok(Repo {
-            secrets,
-            password: Password::Pipe(pw),
+            secrets: RepoSecrets {
+                repository: repository.to_string(),
+                password: password.to_string(),
+                env,
+            },
+            password: Password::Pipe(password),
         })
     }
 
@@ -205,14 +210,8 @@ fn needed_env(repo: &str) -> Vec<&'static str> {
     }
 }
 
-pub fn init(vol_name: &str, repository: &str, env_pairs: &[String], existing_password: bool) -> Result<()> {
-    let mut vol = Volume::load(vol_name)?;
-    if !vol.is_unlocked()? {
-        bail!("unlock '{vol_name}' first (`sealctl unlock {vol_name}`)");
-    }
-    if !util::which(&restic_bin()) && std::env::var_os("SEALCTL_RESTIC").is_none() {
-        bail!("restic not found — install it (brew install restic / apt install restic)");
-    }
+/// Storage credentials: `--env` pairs, then the process environment, then a hidden prompt.
+fn collect_env(repository: &str, env_pairs: &[String]) -> Result<BTreeMap<String, String>> {
     let mut env = BTreeMap::new();
     for p in env_pairs {
         let (k, v) = p
@@ -234,34 +233,35 @@ pub fn init(vol_name: &str, repository: &str, env_pairs: &[String], existing_pas
         env.entry("AWS_DEFAULT_REGION".into())
             .or_insert_with(|| "auto".into());
     }
-    let password = if existing_password {
-        util::read_hidden("Existing restic repository password: ")?
-    } else {
-        util::random_secret(32)?
-    };
+    Ok(env)
+}
+
+/// Configure backups for an unlocked volume. The repository password is derived from the
+/// Ledger seed and the repository URL; re-running `init` with the same URL reconnects to an
+/// existing repository.
+pub fn init(oracle: &mut dyn Oracle, vol_name: &str, repository: &str, env_pairs: &[String]) -> Result<()> {
+    let mut vol = Volume::load(vol_name)?;
+    if !vol.is_unlocked()? {
+        bail!("unlock '{vol_name}' first (`sealctl unlock {vol_name}`)");
+    }
+    if !util::which(&restic_bin()) && std::env::var_os("SEALCTL_RESTIC").is_none() {
+        bail!("restic not found — install it (brew install restic / apt install restic)");
+    }
+    let env = collect_env(repository, env_pairs)?;
+    let password = derive::passphrase(oracle, Purpose::Restic, repository)?;
     let secrets = RepoSecrets {
         repository: repository.to_string(),
         password: password.to_string(),
         env,
     };
-
-    // Escrow first, then in-volume copy, then the repository.
-    let cert = cert::own()?;
-    let escrow = crypto::encrypt(
-        std::slice::from_ref(&cert),
-        toml::to_string(&secrets)?.as_bytes(),
-        true,
-    )?;
-    paths::write_private(&vol.backup_escrow_file()?, &escrow)?;
     write_inner(&vol, &secrets)?;
-    if !existing_password {
-        Repo::from_unlocked(&vol)?.run(&["init"], false)?;
+    let repo = Repo::from_unlocked(&vol)?;
+    if repo.run(&["cat", "config"], true).is_ok() {
+        println!("existing repository found — reconnected (same seed, same URL ⇒ same password)");
     } else {
-        Repo::from_unlocked(&vol)?
-            .run(&["cat", "config"], true)
-            .context("checking the existing repository")?;
+        repo.run(&["init"], false)?;
     }
-    vol.backup = Some(BackupPolicy::default());
+    vol.backup = Some(BackupPolicy::new(repository));
     vol.save()?;
     println!("✅ backups configured for '{vol_name}' → {repository}");
     println!("   first backup:      sealctl backup run {vol_name}");
@@ -393,13 +393,13 @@ pub fn run(names: &[String], all: bool, if_unlocked: bool, quiet: bool) -> Resul
     Ok(())
 }
 
-pub fn snapshots(ctx: &Ctx, vol: &str) -> Result<()> {
+pub fn snapshots(oracle: &mut dyn Oracle, vol: &str) -> Result<()> {
     let v = Volume::load(vol)?;
-    Repo::open(ctx, &v)?.run(&["snapshots", "--tag", &format!("vol:{vol}")], false)
+    Repo::open(oracle, &v)?.run(&["snapshots", "--tag", &format!("vol:{vol}")], false)
 }
 
 pub fn restore(
-    ctx: &Ctx,
+    oracle: &mut dyn Oracle,
     vol: &str,
     snapshot: &str,
     target: &std::path::Path,
@@ -423,19 +423,19 @@ pub fn restore(
     for p in &incl {
         args.extend(["--include", p]);
     }
-    Repo::open(ctx, &v)?.run(&args, false)?;
+    Repo::open(oracle, &v)?.run(&args, false)?;
     println!("✅ restored into {target}{}", v.mountpoint.display());
     Ok(())
 }
 
-pub fn check(ctx: &Ctx, vol: &str, read_data_percent: Option<u8>) -> Result<()> {
+pub fn check(oracle: &mut dyn Oracle, vol: &str, read_data_percent: Option<u8>) -> Result<()> {
     let v = Volume::load(vol)?;
     let subset = read_data_percent.map(|p| format!("--read-data-subset={p}%"));
     let mut args = vec!["check"];
     if let Some(s) = &subset {
         args.push(s);
     }
-    Repo::open(ctx, &v)?.run(&args, false)
+    Repo::open(oracle, &v)?.run(&args, false)
 }
 
 pub fn set_policy(vol: &str, f: impl FnOnce(&mut BackupPolicy)) -> Result<()> {

@@ -76,12 +76,38 @@ pub fn run(ctx: &Ctx, full: bool) -> Result<()> {
         }
     }
 
-    // 4. Escrow copies of volume secrets exist.
-    for v in crate::volume::Volume::list()? {
+    // 4. Key derivation on the device is deterministic (fresh connection, no agent cache).
+    if full {
+        let mut a = crate::derive::CardOracle::open(ctx)?;
+        let k1 = crate::derive::derive(&mut a, crate::derive::Purpose::Volume, "sealctl-doctor-probe")?;
+        drop(a);
+        let mut b = crate::derive::CardOracle::open(ctx)?;
+        let k2 = crate::derive::derive(&mut b, crate::derive::Purpose::Volume, "sealctl-doctor-probe")?;
         report(
-            v.key_file()?.exists(),
-            format!("volume '{}': encrypted passphrase present", v.name),
+            k1 == k2,
+            format!(
+                "seed-derived keys are reproducible (check {})",
+                crate::derive::key_check(k1.as_slice())
+            ),
         );
+    }
+
+    // 5. Volumes use derived keys.
+    for v in crate::volume::Volume::list()? {
+        if v.is_legacy() {
+            report(
+                false,
+                format!(
+                    "volume '{}' still uses a key file — run `sealctl volume rekey {}`",
+                    v.name, v.name
+                ),
+            );
+        } else {
+            report(
+                true,
+                format!("volume '{}' key derives from the seed + id {}", v.name, v.id),
+            );
+        }
     }
 
     if !ok {

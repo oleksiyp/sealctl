@@ -6,16 +6,16 @@ set -eu
 S="${SEALCTL:-sealctl} $*"
 step() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 
-step "1/5 doctor: certificate ↔ card, test decryption (PIN on the device if asked)"
-$S doctor --full
+step "1/6 doctor: certificate ↔ card, decryption, reproducible derived keys (PIN on the device)"
+SEALCTL_NO_AGENT=1 $S doctor --full
 
-step "2/5 secrets + run (one device session)"
+step "2/6 secrets + run (agent starts; PIN at most once)"
 printf 'it-works' | $S secret set smoketest/demo --force
 $S run -e DEMO=smoketest/demo -- sh -c 'test "$DEMO" = it-works && echo "run: secret injected ✅"'
 $S secret rm smoketest/demo
 
-step "3/5 volume: create → lock → unlock via Ledger → lock"
-$S volume create smoketest --size 200m
+step "3/6 volume: create → lock → unlock with the seed-derived key → lock"
+$S volume create smoketest --kind sparsebundle --size 200m
 echo hello > "/Volumes/smoketest/hello.txt" 2>/dev/null || true
 $S lock smoketest
 $S unlock smoketest
@@ -24,7 +24,11 @@ $S volume rm smoketest --delete-data <<EOF
 y
 EOF
 
-step "4/5 SSH agent signs with the Ledger"
+step "4/6 agent session"
+$S agent status
+$S agent stop
+
+step "5/6 SSH agent signs with the Ledger"
 TMPD=$(mktemp -d); SOCK="$TMPD/agent.sock"
 $S ssh agent --socket "$SOCK" & AGENT=$!
 for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "$SOCK" ] && break; sleep 0.5; done
@@ -35,6 +39,6 @@ printf '%s %s\n' "smoke@test" "$(cat "$PUB")" > "$PUB.allowed"
 ssh-keygen -Y verify -f "$PUB.allowed" -I smoke@test -n smoketest -s "$PUB.msg.sig" < "$PUB.msg"
 kill $AGENT; wait $AGENT 2>/dev/null || true; rm -rf "$PUB" "$PUB.msg" "$PUB.msg.sig" "$PUB.allowed" "$TMPD"
 
-step "5/5 status"
+step "6/6 status"
 $S status
 printf '\n✅ hardware smoke test passed\n'

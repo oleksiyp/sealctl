@@ -7,7 +7,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use sealctl::volume::{self, Kind};
-use sealctl::{backup, card, cert, crypto, doctor, git, kit, pin, project, secrets, setup, ssh, util, Ctx};
+use sealctl::{
+    agent, backup, card, cert, crypto, doctor, git, kit, pin, project, secrets, setup, ssh, util, Ctx,
+};
 use sealctl_ledger::Select;
 
 #[derive(Parser)]
@@ -52,7 +54,8 @@ enum Cmd {
 
     /// Unlock a volume (decrypts its key on the Ledger).
     Unlock { name: String },
-    /// Lock a volume (backs it up first if configured). Without a name: lock all.
+    /// Lock a volume (backs it up first if configured). Without a name: lock all volumes and
+    /// stop the agent.
     Lock {
         name: Option<String>,
         /// Skip the backup before locking.
@@ -109,6 +112,10 @@ enum Cmd {
         output: Option<PathBuf>,
     },
 
+    /// The session agent: remembers Ledger results after one PIN entry, exits when idle.
+    #[command(subcommand)]
+    Agent(AgentCmd),
+
     /// SSH agent and public key.
     #[command(subcommand)]
     Ssh(SshCmd),
@@ -131,7 +138,7 @@ enum Cmd {
         #[arg(value_enum)]
         which: pin::Which,
     },
-    /// Check that keys, certificate and escrow files are consistent.
+    /// Check that the card keys match the certificate and seed-derived keys are reproducible.
     Doctor {
         /// Also do a test decryption on the device.
         #[arg(long)]
@@ -170,6 +177,19 @@ enum VolumeCmd {
     },
     /// List volumes.
     Ls,
+    /// Register an existing sealctl volume on this machine (e.g. after recovery):
+    /// a .sparsebundle / .luks path, or an APFS volume UUID.
+    Import {
+        name: String,
+        /// Path of the image file, or the APFS volume UUID.
+        target: String,
+        #[arg(long, value_enum)]
+        kind: Kind,
+        #[arg(long)]
+        mountpoint: Option<PathBuf>,
+    },
+    /// Convert a volume made by an older sealctl (stored key file) to a seed-derived key.
+    Rekey { name: String },
     /// Forget a volume (keeps the encrypted data unless --delete-data).
     Rm {
         name: String,
@@ -189,9 +209,6 @@ enum BackupCmd {
         /// Extra environment for restic, KEY=VALUE (credentials are asked for if missing).
         #[arg(long = "env", short = 'e')]
         env: Vec<String>,
-        /// Use an existing repository (asks for its password).
-        #[arg(long)]
-        existing: bool,
     },
     /// Back up volumes now.
     Run {
@@ -285,6 +302,23 @@ enum SecretCmd {
 }
 
 #[derive(Subcommand)]
+enum AgentCmd {
+    /// Run the agent in the foreground (normally started automatically).
+    Run {
+        /// Exit after this many minutes without requests.
+        #[arg(long, default_value_t = 60)]
+        idle: u64,
+        /// Exit this many hours after starting, even while in use (PIN needed again).
+        #[arg(long, default_value_t = 24)]
+        max_hours: u64,
+    },
+    /// Forget everything now and exit.
+    Stop,
+    /// Is it running, how much is cached, when does it expire.
+    Status,
+}
+
+#[derive(Subcommand)]
 enum SshCmd {
     /// Print the public key (authorized_keys / GitHub format).
     Pubkey,
@@ -359,7 +393,13 @@ fn real_main(cli: Cli) -> Result<()> {
     let targs = transport_args(&cli);
     match cli.cmd {
         Cmd::Status => card::overview(),
-        Cmd::Unlock { name } => volume::unlock(&ctx, &name).map(|_| ()),
+        Cmd::Unlock { name } => {
+            if volume::Volume::load(&name)?.is_unlocked()? {
+                println!("'{name}' is already unlocked");
+                return Ok(());
+            }
+            volume::unlock(agent::oracle(&ctx)?.as_mut(), &name).map(|_| ())
+        }
         Cmd::Lock {
             name: Some(n),
             no_backup,
@@ -369,7 +409,46 @@ fn real_main(cli: Cli) -> Result<()> {
             name: None,
             no_backup,
             force,
-        } => volume::lock_all(no_backup, force),
+        } => {
+            volume::lock_all(no_backup, force)?;
+            if agent::stop()? {
+                println!("🔒 agent stopped — the Ledger is needed again next time");
+            }
+            Ok(())
+        }
+        Cmd::Agent(AgentCmd::Run { idle, max_hours }) => agent::run(
+            ctx,
+            agent::Limits {
+                idle: Duration::from_secs(idle.max(1) * 60),
+                max_life: Duration::from_secs(max_hours.max(1) * 3600),
+            },
+        ),
+        Cmd::Agent(AgentCmd::Stop) => {
+            println!(
+                "{}",
+                if agent::stop()? {
+                    "agent stopped"
+                } else {
+                    "agent was not running"
+                }
+            );
+            Ok(())
+        }
+        Cmd::Agent(AgentCmd::Status) => {
+            match agent::AgentClient::connect() {
+                Ok(mut c) => {
+                    let (n, idle_left, life_left) = c.status()?;
+                    println!(
+                        "running — {n} cached result(s); exits after {} min idle, at the latest in {}h{:02}m",
+                        idle_left / 60,
+                        life_left / 3600,
+                        (life_left % 3600) / 60
+                    );
+                }
+                Err(_) => println!("not running (starts automatically when needed)"),
+            }
+            Ok(())
+        }
 
         Cmd::Volume(VolumeCmd::Create {
             name,
@@ -379,22 +458,25 @@ fn real_main(cli: Cli) -> Result<()> {
             container,
             mountpoint,
         }) => {
-            let v = volume::create(volume::CreateOpts {
-                name,
-                kind: kind.unwrap_or_else(Kind::default_for_os),
-                size,
-                path,
-                container,
-                mountpoint,
-            })?;
+            let v = volume::create(
+                agent::oracle(&ctx)?.as_mut(),
+                volume::CreateOpts {
+                    name,
+                    kind: kind.unwrap_or_else(Kind::default_for_os),
+                    size,
+                    path,
+                    container,
+                    mountpoint,
+                },
+            )?;
             println!(
                 "✅ volume '{}' created and unlocked at {}",
                 v.name,
                 v.mountpoint.display()
             );
             println!(
-                "   Its key is encrypted to your Ledger. Next: sealctl backup init {} --repo …",
-                v.name
+                "   Its key is derived from your Ledger seed and the volume id {} — nothing to back up.",
+                v.id
             );
             Ok(())
         }
@@ -411,6 +493,13 @@ fn real_main(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Volume(VolumeCmd::Import {
+            name,
+            target,
+            kind,
+            mountpoint,
+        }) => volume::import(&name, kind, &target, mountpoint).map(|_| ()),
+        Cmd::Volume(VolumeCmd::Rekey { name }) => volume::rekey(&ctx, agent::oracle(&ctx)?.as_mut(), &name),
         Cmd::Volume(VolumeCmd::Rm { name, delete_data }) => {
             if delete_data && !util::confirm(&format!("Permanently delete the encrypted data of '{name}'?"))?
             {
@@ -420,26 +509,31 @@ fn real_main(cli: Cli) -> Result<()> {
         }
 
         Cmd::Backup(b) => match b {
-            BackupCmd::Init {
-                volume,
-                repo,
-                env,
-                existing,
-            } => backup::init(&volume, &repo, &env, existing),
+            BackupCmd::Init { volume, repo, env } => {
+                backup::init(agent::oracle(&ctx)?.as_mut(), &volume, &repo, &env)
+            }
             BackupCmd::Run {
                 volumes,
                 all,
                 if_unlocked,
                 quiet,
             } => backup::run(&volumes, all, if_unlocked, quiet),
-            BackupCmd::Snapshots { volume } => backup::snapshots(&ctx, &volume),
+            BackupCmd::Snapshots { volume } => backup::snapshots(agent::oracle(&ctx)?.as_mut(), &volume),
             BackupCmd::Restore {
                 volume,
                 snapshot,
                 target,
                 include,
-            } => backup::restore(&ctx, &volume, &snapshot, &target, &include),
-            BackupCmd::Check { volume, read_data } => backup::check(&ctx, &volume, read_data),
+            } => backup::restore(
+                agent::oracle(&ctx)?.as_mut(),
+                &volume,
+                &snapshot,
+                &target,
+                &include,
+            ),
+            BackupCmd::Check { volume, read_data } => {
+                backup::check(agent::oracle(&ctx)?.as_mut(), &volume, read_data)
+            }
             BackupCmd::Policy {
                 volume,
                 on_lock,
@@ -471,12 +565,12 @@ fn real_main(cli: Cli) -> Result<()> {
         Cmd::Secret(s) => match s {
             SecretCmd::Set { name, force } => {
                 let v = secrets::read_value(&name)?;
-                secrets::set(&name, &v, force)?;
+                secrets::set(agent::oracle(&ctx)?.as_mut(), &name, &v, force)?;
                 eprintln!("✅ stored {name}");
                 Ok(())
             }
             SecretCmd::Get { name, clip } => {
-                let v = secrets::get(&ctx, &name)?;
+                let v = secrets::get(agent::oracle(&ctx)?.as_mut(), &name)?;
                 if clip {
                     util::copy_to_clipboard_with_clear(&v, 45)?;
                     eprintln!("📋 copied {name} (clears in 45 s)");
@@ -492,13 +586,15 @@ fn real_main(cli: Cli) -> Result<()> {
                 Ok(())
             }
             SecretCmd::Rm { name } => secrets::remove(&name),
-            SecretCmd::ImportEnv { file, prefix, delete } => project::import_dotenv(&file, &prefix, delete),
+            SecretCmd::ImportEnv { file, prefix, delete } => {
+                project::import_dotenv(agent::oracle(&ctx)?.as_mut(), &file, &prefix, delete)
+            }
         },
         Cmd::Run {
             env,
             no_project,
             command,
-        } => project::run(&ctx, &env, !no_project, &command),
+        } => project::run(agent::oracle(&ctx)?.as_mut(), &env, !no_project, &command),
 
         Cmd::Encrypt {
             input,

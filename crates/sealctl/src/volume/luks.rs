@@ -5,9 +5,11 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use zeroize::Zeroizing;
 
 use super::{Backend, Volume};
+use crate::derive;
 use crate::util::{check, run_with_stdin};
 
 pub struct Luks;
@@ -31,8 +33,18 @@ fn is_mounted(mp: &Path) -> Result<bool> {
 }
 
 impl Backend for Luks {
-    fn create(&self, v: &mut Volume, size: &str, passphrase: &[u8]) -> Result<()> {
-        let path = v.path.as_ref().context("luks needs a path")?;
+    fn create(
+        &self,
+        v: &mut Volume,
+        size: &str,
+        key_for: &mut dyn FnMut(&str) -> Result<Zeroizing<String>>,
+    ) -> Result<Zeroizing<String>> {
+        let path = v.path.clone().context("luks needs a path")?;
+        let path = &path;
+        // We choose the LUKS UUID, so the key can be derived before formatting.
+        let id = derive::new_uuid()?;
+        let pass = key_for(&id)?;
+        let passphrase = pass.as_bytes();
         check(
             Command::new("truncate").args(["-s", size]).arg(path).output()?,
             "truncate",
@@ -40,7 +52,15 @@ impl Backend for Luks {
         check(
             run_with_stdin(
                 Command::new("cryptsetup")
-                    .args(["luksFormat", "--type", "luks2", "--batch-mode", "--key-file=-"])
+                    .args([
+                        "luksFormat",
+                        "--type",
+                        "luks2",
+                        "--batch-mode",
+                        "--key-file=-",
+                        "--uuid",
+                        &id,
+                    ])
                     .arg(path),
                 passphrase,
             )?,
@@ -78,7 +98,31 @@ impl Backend for Luks {
             Ok(())
         });
         let _ = sudo().args(["cryptsetup", "close", &mapper]).output();
-        res.map(|_| ())
+        res?;
+        v.id = id;
+        Ok(pass)
+    }
+
+    fn read_id(&self, v: &Volume) -> Result<String> {
+        let path = v.path.as_ref().context("luks needs a path")?;
+        let out = check(
+            Command::new("cryptsetup").arg("luksUUID").arg(path).output()?,
+            "cryptsetup luksUUID",
+        )?;
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    fn change_passphrase(&self, _v: &Volume, _old: &[u8], _new: &[u8]) -> Result<()> {
+        bail!("changing a LUKS passphrase in place is not supported yet")
+    }
+
+    fn destroy(&self, v: &Volume) -> Result<()> {
+        if let Some(p) = &v.path {
+            if p.exists() {
+                std::fs::remove_file(p)?;
+            }
+        }
+        Ok(())
     }
 
     fn unlock(&self, v: &Volume, passphrase: &[u8]) -> Result<()> {
@@ -93,7 +137,7 @@ impl Backend for Luks {
                         .arg(&mapper),
                     passphrase,
                 )?,
-                "cryptsetup open (wrong passphrase?)",
+                "cryptsetup open (wrong key?)",
             )?;
         }
         std::fs::create_dir_all(&v.mountpoint)?;
