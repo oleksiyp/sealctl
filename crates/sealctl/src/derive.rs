@@ -21,8 +21,17 @@
 //! Security rests on the card key never leaving the device: the point has no known discrete
 //! log, so `S` cannot be computed from the public key (which a scalar-multiple-of-G point would
 //! allow).
+//!
+//! **Blinding (transport protection).** The device is never asked for `X25519(k, u)` directly.
+//! As in RFC 9497 (Blind / Finalize), the host picks a fresh random scalar `r`, sends `r·u`,
+//! receives `k·r·u` and computes `r⁻¹·(k·r·u) = k·u` locally. USB / Bluetooth only ever carry
+//! random-looking points: an eavesdropper learns neither `S` nor which id is being derived.
+//! The result is identical to the unblinded one (the clamped `k` is a multiple of 8, so torsion
+//! components vanish and `r⁻¹` cancels `r` on the prime-order part).
 
 use anyhow::{bail, Context, Result};
+use curve25519_dalek::montgomery::MontgomeryPoint;
+use curve25519_dalek::scalar::Scalar;
 use num_bigint::BigUint;
 use openpgp_card::ocard::crypto::Cryptogram;
 use openpgp_card::state::Open;
@@ -125,7 +134,34 @@ pub fn key_check(key: &[u8]) -> String {
     hex::encode(&Sha256::digest([b"sealctl/key-check\0".as_slice(), key].concat())[..4])
 }
 
-/// The Ledger as oracle: PSO:DECIPHER with the card's X25519 decryption key.
+/// Wraps an oracle so it only ever sees blinded points (RFC 9497-style Blind / Finalize).
+pub struct Blinded<O: Oracle>(pub O);
+
+impl<O: Oracle> Oracle for Blinded<O> {
+    fn x25519(&mut self, u: &[u8; 32]) -> Result<[u8; 32]> {
+        blinded_call(u, |b| self.0.x25519(b))
+    }
+}
+
+/// Send `r·u` instead of `u`, unblind the answer with `r⁻¹`.
+fn blinded_call(u: &[u8; 32], call: impl FnOnce(&[u8; 32]) -> Result<[u8; 32]>) -> Result<[u8; 32]> {
+    use zeroize::Zeroize;
+    let mut wide = Zeroizing::new([0u8; 64]);
+    getrandom::fill(wide.as_mut_slice()).map_err(|e| anyhow::anyhow!("system RNG failed: {e}"))?;
+    let mut r = Scalar::from_bytes_mod_order_wide(&wide);
+    if r == Scalar::ZERO {
+        bail!("degenerate blinding scalar");
+    }
+    let blinded = MontgomeryPoint(*u) * r;
+    let mut r_inv = r.invert();
+    r.zeroize();
+    let resp = call(&blinded.0);
+    let out = resp.map(|s| (MontgomeryPoint(s) * r_inv).0);
+    r_inv.zeroize();
+    out
+}
+
+/// The Ledger as oracle: PSO:DECIPHER with the card's X25519 decryption key, always blinded.
 /// One connection; the PIN is asked for at most once.
 pub struct CardOracle {
     card: Card<Open>,
@@ -148,14 +184,17 @@ impl Oracle for CardOracle {
             ensure_user_pin(&mut tx)?;
             self.pin_checked = true;
         }
-        let s = tx
-            .card()
-            .decipher(Cryptogram::ECDH(u))
-            .map_err(|e| crate::device::explain(anyhow::anyhow!("{e}")))
-            .context("key derivation on the Ledger")?;
-        s.as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("unexpected ECDH result length {}", s.len()))
+        blinded_call(u, |b| {
+            let s = Zeroizing::new(
+                tx.card()
+                    .decipher(Cryptogram::ECDH(b))
+                    .map_err(|e| crate::device::explain(anyhow::anyhow!("{e}")))
+                    .context("key derivation on the Ledger")?,
+            );
+            s.as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("unexpected ECDH result length {}", s.len()))
+        })
     }
 }
 
@@ -190,6 +229,53 @@ pub fn canonical_id(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Soft(x25519_dalek::StaticSecret, Vec<[u8; 32]>);
+
+    impl Oracle for Soft {
+        fn x25519(&mut self, u: &[u8; 32]) -> Result<[u8; 32]> {
+            self.1.push(*u); // what the "device" saw
+            Ok(self
+                .0
+                .diffie_hellman(&x25519_dalek::PublicKey::from(*u))
+                .to_bytes())
+        }
+    }
+
+    #[test]
+    fn blinding_gives_identical_results_and_hides_the_input() {
+        let key = [7u8; 32];
+        for i in 0..64 {
+            let id = format!("id-{i}");
+            for purpose in [Purpose::Volume, Purpose::Restic, Purpose::Secrets] {
+                let u = hash_to_u(purpose, &id);
+                let mut plain = Soft(x25519_dalek::StaticSecret::from(key), vec![]);
+                let mut blind = Blinded(Soft(x25519_dalek::StaticSecret::from(key), vec![]));
+                assert_eq!(
+                    plain.x25519(&u).unwrap(),
+                    blind.x25519(&u).unwrap(),
+                    "{purpose:?} {id}"
+                );
+                assert_ne!(blind.0 .1[0], u, "device never sees u");
+                // and derived keys match end to end
+                let a = derive(&mut plain, purpose, &id).unwrap();
+                let b = derive(&mut blind, purpose, &id).unwrap();
+                assert_eq!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn blinding_is_fresh_each_time() {
+        let u = hash_to_u(Purpose::Volume, "same");
+        let mut blind = Blinded(Soft(x25519_dalek::StaticSecret::from([3u8; 32]), vec![]));
+        blind.x25519(&u).unwrap();
+        blind.x25519(&u).unwrap();
+        assert_ne!(
+            blind.0 .1[0], blind.0 .1[1],
+            "requests for the same id are unlinkable"
+        );
+    }
 
     #[test]
     fn hash_to_u_is_deterministic_and_on_curve() {

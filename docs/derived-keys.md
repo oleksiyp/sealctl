@@ -39,8 +39,23 @@ key = HKDF-SHA256(salt = LABEL,
 passphrase = lowercase hex(key)                   # 64 characters, handed to the OS tool
 ```
 
-On the card, `u` is sent as the 32-byte little-endian external public key in a PSO:DECIPHER
-`A6 { 7F49 { 86 u } }` template; the app returns `S` little-endian.
+On the card, the point is sent as the 32-byte little-endian external public key in a
+PSO:DECIPHER `A6 { 7F49 { 86 · } }` template; the app returns the result little-endian.
+
+### Blinding (transport protection)
+
+The device is never asked for `X25519(k, u)` directly (RFC 9497 *Blind* / *Finalize*):
+
+```
+r  = fresh random scalar mod ℓ (from 64 random bytes)
+B  = r·u                     → sent to the device      (random-looking; unlinkable)
+R  = X25519(k, B) = k·r·u    ← returned by the device   (random-looking)
+S  = r⁻¹·R  = k·u            computed on the host
+```
+
+The clamped `k` is a multiple of 8, so torsion components vanish and `r⁻¹` cancels `r` on the
+prime-order part: `S` is bit-for-bit the unblinded result (tested for all purposes). USB and
+Bluetooth therefore never carry `S`, and an eavesdropper cannot tell which id is derived.
 
 ## Why this shape
 

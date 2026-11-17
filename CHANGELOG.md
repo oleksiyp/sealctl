@@ -16,6 +16,8 @@ key files anymore. Volumes from 0.1.0 convert with `sealctl volume rekey <name>`
 - Seed-derived keys (docs/derived-keys.md): volume passphrase from seed + volume UUID, restic
   password from seed + repository URL, secret-store key from seed. Only the 24 words are needed
   to recover everything. Pinned test vectors.
+- Blinded key derivation (RFC 9497-style): the device and the USB/Bluetooth link only see
+  random-looking points; results are identical to unblinded derivation.
 - `sealctl agent`: session cache after one PIN entry; exits after 1 h idle and at most 24 h;
   `agent status|stop`; `sealctl lock` (all) stops it; one thread per client.
 - `volume import` (register a disk on a new machine), `volume rekey` (convert 0.1.0 volumes).

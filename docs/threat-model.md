@@ -7,8 +7,11 @@
 - **Stolen laptop while powered off or locked volumes** — volumes stay locked without the Ledger
   and its PIN.
 - **Malware reading files at rest** — passphrase files are OpenPGP-encrypted to the card.
-- **Bluetooth eavesdropping** — the Ledger BLE link is encrypted after pairing; verify the
-  pairing code on the device the first time.
+- **Bluetooth / USB eavesdropping** — key-derivation requests are blinded (docs/derived-keys.md),
+  so the link only carries random-looking points; the BLE link is additionally encrypted after
+  pairing (verify the pairing code on the device the first time). File decryption
+  (`sealctl decrypt`) uses the standard OpenPGP card path, which is not blinded — prefer
+  `-t usb` for it.
 - **Losing the device or the computer** — all keys are derived from the seed; nothing else
   needs to survive (see docs/derived-keys.md).
 
