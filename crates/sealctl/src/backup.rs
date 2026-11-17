@@ -269,12 +269,14 @@ pub fn init(vol_name: &str, repository: &str, env_pairs: &[String], existing_pas
     Ok(())
 }
 
-const MAC_EXCLUDES: &[&str] = &[
+/// Filesystem bookkeeping, never user data (macOS metadata, ext4 lost+found).
+const SYSTEM_EXCLUDES: &[&str] = &[
     ".Spotlight-V100",
     ".fseventsd",
     ".Trashes",
     ".TemporaryItems",
     ".DocumentRevisions-V100",
+    "lost+found",
 ];
 
 pub fn run_one(vol: &Volume, quiet: bool) -> Result<()> {
@@ -298,7 +300,7 @@ pub fn run_one(vol: &Volume, quiet: bool) -> Result<()> {
         "--tag".into(),
         tag.clone(),
     ];
-    for ex in std::iter::once(".sealctl").chain(MAC_EXCLUDES.iter().copied()) {
+    for ex in std::iter::once(".sealctl").chain(SYSTEM_EXCLUDES.iter().copied()) {
         args.push("--exclude".into());
         args.push(format!("{mp}/{ex}"));
     }
