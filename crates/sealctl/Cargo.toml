@@ -18,6 +18,5 @@ log.workspace = true
 openpgp-card.workspace = true
 clap.workspace = true
 env_logger.workspace = true
-chrono.workspace = true
 openpgp-card-rpgp.workspace = true
 pgp.workspace = true

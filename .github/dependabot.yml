@@ -11,3 +11,6 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # pinned on purpose: the MSRV job must use the declared rust-version
+      - dependency-name: dtolnay/rust-toolchain
