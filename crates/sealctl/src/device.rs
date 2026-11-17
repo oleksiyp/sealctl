@@ -21,9 +21,13 @@ impl Ctx {
         let kind = t.kind();
         let (app, version) = sealctl_ledger::running_app(t.as_mut()).map_err(explain)?;
         if app != "OpenPGP" {
+            let place = if app == "BOLOS" {
+                "its dashboard".to_string()
+            } else {
+                format!("the \"{app}\" app")
+            };
             bail!(
-                "the Ledger is on \"{}\" — open the OpenPGP app on the device and retry{}",
-                if app == "BOLOS" { "the dashboard" } else { &app },
+                "the Ledger is on {place} — open the OpenPGP app on the device and retry{}",
                 if kind == TransportKind::Ble {
                     " (Bluetooth needs the Bluetooth-enabled OpenPGP build)"
                 } else {
