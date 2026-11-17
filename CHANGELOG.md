@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-17
+
 ### Added
 - Ledger USB-HID and Bluetooth LE transports implementing the `openpgp-card` `CardBackend`
   (on-device PIN entry via the OpenPGP app's PIN-pad mode).
@@ -35,3 +37,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Changed
 - Minimum supported Rust version is 1.89 (required by dependencies).
 - `sealctl status` is now the local overview; card details moved to `sealctl card`.
+
+[Unreleased]: https://github.com/oleksiyp/sealctl/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/oleksiyp/sealctl/releases/tag/v0.1.0
