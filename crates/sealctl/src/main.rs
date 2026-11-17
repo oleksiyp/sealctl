@@ -482,14 +482,21 @@ fn real_main(cli: Cli) -> Result<()> {
         }
         Cmd::Volume(VolumeCmd::Ls) => {
             for v in volume::Volume::list()? {
-                let open = v.is_unlocked().unwrap_or(false);
+                let (icon, err) = match v.is_unlocked() {
+                    Ok(true) => ("🔓", None),
+                    Ok(false) => ("🔒", None),
+                    Err(e) => ("❓", Some(e)),
+                };
                 println!(
                     "{:<14} {:<13} {} {}",
                     v.name,
                     format!("{:?}", v.kind).to_lowercase(),
-                    if open { "🔓" } else { "🔒" },
+                    icon,
                     v.mountpoint.display()
                 );
+                if let Some(e) = err {
+                    println!("               state unknown: {e:#}");
+                }
             }
             Ok(())
         }

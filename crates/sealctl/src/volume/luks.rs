@@ -51,7 +51,7 @@ impl Backend for Luks {
         )?;
         check(
             run_with_stdin(
-                Command::new("cryptsetup")
+                crate::util::system_cmd("cryptsetup")
                     .args([
                         "luksFormat",
                         "--type",
@@ -106,7 +106,10 @@ impl Backend for Luks {
     fn read_id(&self, v: &Volume) -> Result<String> {
         let path = v.path.as_ref().context("luks needs a path")?;
         let out = check(
-            Command::new("cryptsetup").arg("luksUUID").arg(path).output()?,
+            crate::util::system_cmd("cryptsetup")
+                .arg("luksUUID")
+                .arg(path)
+                .output()?,
             "cryptsetup luksUUID",
         )?;
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())

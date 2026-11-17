@@ -2,8 +2,6 @@
 //! "Add APFS volume → APFS (Encrypted)" creates. The volume UUID (readable while locked) is the
 //! input of the key derivation.
 
-use std::process::Command;
-
 use anyhow::{bail, Context, Result};
 use zeroize::Zeroizing;
 
@@ -13,7 +11,9 @@ use crate::util::{check, random_secret, run_with_stdin};
 pub struct ApfsVolume;
 
 fn info_value(target: &str, key: &str) -> Result<Option<String>> {
-    let out = Command::new("diskutil").args(["info", target]).output()?;
+    let out = crate::util::system_cmd("diskutil")
+        .args(["info", target])
+        .output()?;
     if !out.status.success() {
         return Ok(None);
     }
@@ -33,7 +33,7 @@ fn change(uuid: &str, old: &[u8], new: &[u8]) -> Result<()> {
     input.push(b'\n');
     check(
         run_with_stdin(
-            Command::new("diskutil").args([
+            crate::util::system_cmd("diskutil").args([
                 "apfs",
                 "changePassphrase",
                 uuid,
@@ -67,7 +67,7 @@ impl Backend for ApfsVolume {
         // derived one. The throwaway never leaves this process.
         let temp = random_secret(32)?;
         let out = run_with_stdin(
-            Command::new("diskutil").args([
+            crate::util::system_cmd("diskutil").args([
                 "apfs",
                 "addVolume",
                 &container,
@@ -98,7 +98,7 @@ impl Backend for ApfsVolume {
             }
             Err(e) => {
                 // don't leave a volume behind that nobody can open
-                let _ = Command::new("diskutil")
+                let _ = crate::util::system_cmd("diskutil")
                     .args(["apfs", "deleteVolume", &uuid])
                     .output();
                 Err(e)
@@ -113,7 +113,7 @@ impl Backend for ApfsVolume {
 
     fn unlock(&self, v: &Volume, passphrase: &[u8]) -> Result<()> {
         let out = run_with_stdin(
-            Command::new("diskutil").args(["apfs", "unlockVolume", &v.id, "-stdinpassphrase"]),
+            crate::util::system_cmd("diskutil").args(["apfs", "unlockVolume", &v.id, "-stdinpassphrase"]),
             passphrase,
         )?;
         check(out, "diskutil apfs unlockVolume (wrong key?)")?;
@@ -122,12 +122,12 @@ impl Backend for ApfsVolume {
 
     fn lock(&self, v: &Volume, force: bool) -> Result<()> {
         if force {
-            let _ = Command::new("diskutil")
+            let _ = crate::util::system_cmd("diskutil")
                 .args(["unmount", "force", &v.id])
                 .output();
         }
         check(
-            Command::new("diskutil")
+            crate::util::system_cmd("diskutil")
                 .args(["apfs", "lockVolume", &v.id])
                 .output()?,
             "diskutil apfs lockVolume (files still open? use --force)",
@@ -145,7 +145,7 @@ impl Backend for ApfsVolume {
 
     fn destroy(&self, v: &Volume) -> Result<()> {
         check(
-            Command::new("diskutil")
+            crate::util::system_cmd("diskutil")
                 .args(["apfs", "deleteVolume", &v.id])
                 .output()?,
             "diskutil apfs deleteVolume",

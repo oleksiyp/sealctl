@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS: `diskutil`, `hdiutil` and `launchctl` (and `cryptsetup`/`systemctl` on Linux) are found
+  in `/usr/sbin`, `/sbin`, … even when those are not on `PATH`. Previously `volume ls` showed a
+  mounted volume as locked, and unlock/lock failed, in shells without `/usr/sbin`.
+- `volume ls` shows ❓ with the error instead of 🔒 when the state cannot be determined.
+
 ## [0.2.0] - 2026-11-17
 
 Breaking: volumes, backups and secrets now use keys derived from the Ledger seed; there are no

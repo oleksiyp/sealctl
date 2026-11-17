@@ -2,8 +2,6 @@
 //! folder of 8 MB bands. sealctl stores the volume id in `<bundle>/sealctl.id` (plaintext,
 //! not secret) so the derived key can be recomputed from the bundle alone.
 
-use std::process::Command;
-
 use anyhow::{bail, Context, Result};
 use zeroize::Zeroizing;
 
@@ -22,7 +20,10 @@ pub fn write_id(v: &Volume, id: &str) -> Result<()> {
 
 /// Mount points of attached images whose image-path equals `path` (from `hdiutil info`).
 pub fn attached_mounts(path: &std::path::Path) -> Result<Vec<String>> {
-    let out = check(Command::new("hdiutil").arg("info").output()?, "hdiutil info")?;
+    let out = check(
+        crate::util::system_cmd("hdiutil").arg("info").output()?,
+        "hdiutil info",
+    )?;
     let text = String::from_utf8_lossy(&out.stdout);
     let want = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut mounts = Vec::new();
@@ -59,7 +60,7 @@ impl Backend for Sparsebundle {
         let id = derive::new_uuid()?;
         let pass = key_for(&id)?;
         let out = run_with_stdin(
-            Command::new("hdiutil")
+            crate::util::system_cmd("hdiutil")
                 .args([
                     "create",
                     "-quiet",
@@ -89,7 +90,7 @@ impl Backend for Sparsebundle {
 
     fn unlock(&self, v: &Volume, passphrase: &[u8]) -> Result<()> {
         let path = v.path.as_ref().context("sparsebundle needs a path")?;
-        let mut cmd = Command::new("hdiutil");
+        let mut cmd = crate::util::system_cmd("hdiutil");
         cmd.args(["attach", "-quiet", "-stdinpass", "-owners", "on"]);
         let default_mp = std::path::Path::new("/Volumes").join(&v.name);
         if v.mountpoint != default_mp {
@@ -108,7 +109,7 @@ impl Backend for Sparsebundle {
     }
 
     fn lock(&self, v: &Volume, force: bool) -> Result<()> {
-        let mut cmd = Command::new("hdiutil");
+        let mut cmd = crate::util::system_cmd("hdiutil");
         cmd.args(["detach", "-quiet"]);
         if force {
             cmd.arg("-force");
@@ -134,7 +135,7 @@ impl Backend for Sparsebundle {
         input.push(0);
         check(
             run_with_stdin(
-                Command::new("hdiutil")
+                crate::util::system_cmd("hdiutil")
                     .args(["chpass", "-oldstdinpass", "-newstdinpass"])
                     .arg(path),
                 &input,

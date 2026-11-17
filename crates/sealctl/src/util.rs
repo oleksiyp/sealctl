@@ -56,6 +56,25 @@ pub fn which(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Directories that hold OS tools (diskutil, hdiutil, launchctl, cryptsetup, systemctl) but are
+/// often missing from a user's PATH — notably `/usr/sbin` on macOS.
+const SYSTEM_DIRS: &[&str] = &["/usr/sbin", "/sbin", "/usr/bin", "/bin"];
+
+/// A `Command` for an OS tool: found on PATH, else in the standard system directories.
+pub fn system_cmd(bin: &str) -> Command {
+    if which(bin) {
+        return Command::new(bin);
+    }
+    match SYSTEM_DIRS
+        .iter()
+        .map(|d| std::path::Path::new(d).join(bin))
+        .find(|p| p.is_file())
+    {
+        Some(p) => Command::new(p),
+        None => Command::new(bin),
+    }
+}
+
 /// Copy to the clipboard and clear it again after `secs` seconds (only if unchanged).
 pub fn copy_to_clipboard_with_clear(text: &str, secs: u64) -> Result<()> {
     let (copy, paste): (Vec<&str>, Vec<&str>) = if cfg!(target_os = "macos") {

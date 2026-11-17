@@ -88,12 +88,12 @@ pub fn install(s: &Service) -> Result<()> {
         );
         let p = plist_path(s.label)?;
         fs::create_dir_all(p.parent().context("dir")?)?;
-        let _ = Command::new("launchctl")
+        let _ = crate::util::system_cmd("launchctl")
             .args(["bootout", &format!("gui/{}", uid())])
             .arg(&p)
             .output();
         fs::write(&p, plist)?;
-        let out = Command::new("launchctl")
+        let out = crate::util::system_cmd("launchctl")
             .args(["bootstrap", &format!("gui/{}", uid())])
             .arg(&p)
             .output()?;
@@ -136,8 +136,8 @@ pub fn install(s: &Service) -> Result<()> {
             )?;
             enable = format!("{name}.timer");
         }
-        run(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
-        run(Command::new("systemctl").args(["--user", "enable", "--now", &enable]))?;
+        run(crate::util::system_cmd("systemctl").args(["--user", "daemon-reload"]))?;
+        run(crate::util::system_cmd("systemctl").args(["--user", "enable", "--now", &enable]))?;
     }
     Ok(())
 }
@@ -145,7 +145,7 @@ pub fn install(s: &Service) -> Result<()> {
 pub fn uninstall(label: &str) -> Result<()> {
     if cfg!(target_os = "macos") {
         let p = plist_path(label)?;
-        let _ = Command::new("launchctl")
+        let _ = crate::util::system_cmd("launchctl")
             .args(["bootout", &format!("gui/{}", uid())])
             .arg(&p)
             .output();
@@ -153,12 +153,12 @@ pub fn uninstall(label: &str) -> Result<()> {
     } else {
         let name = unit_name(label);
         for u in [format!("{name}.timer"), format!("{name}.service")] {
-            let _ = Command::new("systemctl")
+            let _ = crate::util::system_cmd("systemctl")
                 .args(["--user", "disable", "--now", &u])
                 .output();
             let _ = fs::remove_file(home()?.join(".config/systemd/user").join(u));
         }
-        let _ = Command::new("systemctl")
+        let _ = crate::util::system_cmd("systemctl")
             .args(["--user", "daemon-reload"])
             .output();
     }
@@ -168,7 +168,7 @@ pub fn uninstall(label: &str) -> Result<()> {
 
 pub fn is_installed(label: &str) -> bool {
     if cfg!(target_os = "macos") {
-        Command::new("launchctl")
+        crate::util::system_cmd("launchctl")
             .args(["print", &format!("gui/{}/{label}", uid())])
             .output()
             .is_ok_and(|o| o.status.success())
@@ -177,7 +177,7 @@ pub fn is_installed(label: &str) -> bool {
         [format!("{name}.timer"), format!("{name}.service")]
             .iter()
             .any(|u| {
-                Command::new("systemctl")
+                crate::util::system_cmd("systemctl")
                     .args(["--user", "is-enabled", u])
                     .output()
                     .is_ok_and(|o| o.status.success())
