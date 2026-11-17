@@ -107,7 +107,8 @@ jobs:
           name: linux-${{ matrix.arch }}
       - run: |
           apt-get update
-          apt-get install -y ./sealctl_*.deb
+          # containers can't run systemd's postinst (pulled in via Recommends: cryptsetup)
+          apt-get install -y --no-install-recommends ./sealctl_*.deb
           sealctl --version
           sealctl --help | grep -q volume
           test -f /usr/share/bash-completion/completions/sealctl
@@ -146,12 +147,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: linux-x86_64
+          pattern: linux-*
           path: dist
+          merge-multiple: true
       - run: |
           pacman -Syu --noconfirm --needed base-devel systemd-libs dbus
           useradd -m builder
-          mkdir /build && cp dist/*.tar.gz /build/
+          mkdir /build && cp dist/*x86_64*.tar.gz /build/
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           scripts/render-pkgbuild.sh "$VERSION" local dist > /build/PKGBUILD
           chown -R builder /build
