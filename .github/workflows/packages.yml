@@ -55,7 +55,7 @@ jobs:
           cargo generate-rpm -p crates/sealctl -o dist/
       - name: List
         run: ls -l dist && ldd target/release/sealctl
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: dist/*
@@ -80,7 +80,7 @@ jobs:
           scripts/package.sh aarch64-apple-darwin
           scripts/package.sh x86_64-apple-darwin
           lipo -info target/*/release/sealctl
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: dist/*
