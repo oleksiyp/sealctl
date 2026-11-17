@@ -10,7 +10,7 @@ mod common;
 
 use std::fs;
 
-use sealctl::volume::{self, backend, Kind, Volume};
+use sealctl::volume::{self, Kind, Volume};
 
 fn unique(prefix: &str) -> String {
     format!("{prefix}{}", std::process::id())
@@ -170,7 +170,7 @@ fn macos_apfs_volume_backend() {
         mountpoint: std::path::Path::new("/Volumes").join(&name),
         backup: None,
     };
-    let be = backend(Kind::ApfsVolume);
+    let be = volume::backend(Kind::ApfsVolume);
     let mut ledger = common::SoftOracle::fixed();
     let res = (|| -> anyhow::Result<()> {
         use sealctl::derive::{canonical_id, passphrase, Purpose};
