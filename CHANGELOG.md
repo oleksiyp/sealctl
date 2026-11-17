@@ -25,6 +25,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - `status` overview and shell `completions`.
 - Integration tests driving hdiutil/diskutil, cryptsetup and restic with a software key.
 
+- Opens the OpenPGP app automatically when the Ledger is on its dashboard.
+- Verified on a Ledger Flex over Bluetooth: decryption, secrets/run, volume unlock, SSH
+  signatures (`scripts/hardware-smoke-test.sh`).
+
 ### Changed
 - Minimum supported Rust version is 1.89 (required by dependencies).
 - `sealctl status` is now the local overview; card details moved to `sealctl card`.

@@ -33,7 +33,7 @@ echo "signed by the Ledger" > "$PUB.msg"
 SSH_AUTH_SOCK="$SOCK" ssh-keygen -Y sign -f "$PUB" -n smoketest "$PUB.msg" >/dev/null
 printf '%s %s\n' "smoke@test" "$(cat "$PUB")" > "$PUB.allowed"
 ssh-keygen -Y verify -f "$PUB.allowed" -I smoke@test -n smoketest -s "$PUB.msg.sig" < "$PUB.msg"
-kill $AGENT; rm -rf "$PUB" "$PUB.msg" "$PUB.msg.sig" "$PUB.allowed" "$TMPD"
+kill $AGENT; wait $AGENT 2>/dev/null || true; rm -rf "$PUB" "$PUB.msg" "$PUB.msg.sig" "$PUB.allowed" "$TMPD"
 
 step "5/5 status"
 $S status
