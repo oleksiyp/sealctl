@@ -1,0 +1,257 @@
+name: Packages
+
+# Every push to main / PR: build all packages and install-test them on real distributions.
+# Tags (v*): additionally publish a GitHub release and update the Homebrew tap.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------- build ----
+  linux:
+    name: build linux (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+    runs-on: ${{ matrix.runner }}
+    # Debian 11 (glibc 2.31): one binary for Debian 11+, Ubuntu 20.04+, RHEL/Rocky 9, Fedora, Arch
+    container: debian:bullseye
+    steps:
+      - name: Toolchain and libraries
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl ca-certificates git build-essential \
+            pkg-config libudev-dev libdbus-1-dev dpkg-dev
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-bullseye
+      - name: Packaging tools
+        run: cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.1
+      - name: Build
+        run: cargo build --release --locked -p sealctl
+      - name: Tarball
+        run: scripts/package.sh ${{ matrix.target }} target/release/sealctl
+      - name: .deb
+        run: |
+          cargo deb -p sealctl --no-build --no-strip --output dist/
+      - name: .rpm
+        run: |
+          cargo generate-rpm -p crates/sealctl -o dist/
+      - name: List
+        run: ls -l dist && ldd target/release/sealctl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+
+  macos:
+    name: build macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build both architectures
+        run: |
+          cargo build --release --locked -p sealctl --target aarch64-apple-darwin
+          cargo build --release --locked -p sealctl --target x86_64-apple-darwin
+      - name: Tarballs
+        env:
+          COMPLETIONS_BIN: target/aarch64-apple-darwin/release/sealctl
+        run: |
+          scripts/package.sh aarch64-apple-darwin
+          scripts/package.sh x86_64-apple-darwin
+          lipo -info target/*/release/sealctl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  # ----------------------------------------------------------------- test ----
+  deb:
+    name: install .deb (${{ matrix.image }}, ${{ matrix.arch }})
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "debian:11", arch: x86_64, runner: ubuntu-24.04 }
+          - { image: "debian:12", arch: x86_64, runner: ubuntu-24.04 }
+          - { image: "ubuntu:22.04", arch: x86_64, runner: ubuntu-24.04 }
+          - { image: "ubuntu:24.04", arch: x86_64, runner: ubuntu-24.04 }
+          - { image: "debian:12", arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+      - run: |
+          apt-get update
+          apt-get install -y ./sealctl_*.deb
+          sealctl --version
+          sealctl --help | grep -q volume
+          test -f /usr/share/bash-completion/completions/sealctl
+          dpkg -s sealctl | grep -E '^(Version|Depends|Recommends)'
+
+  rpm:
+    name: install .rpm (${{ matrix.image }}, ${{ matrix.arch }})
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "fedora:latest", arch: x86_64, runner: ubuntu-24.04, install: "dnf install -y" }
+          - { image: "rockylinux:9", arch: x86_64, runner: ubuntu-24.04, install: "dnf install -y" }
+          - { image: "opensuse/tumbleweed", arch: x86_64, runner: ubuntu-24.04, install: "zypper --non-interactive install --allow-unsigned-rpm" }
+          - { image: "fedora:latest", arch: aarch64, runner: ubuntu-24.04-arm, install: "dnf install -y" }
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+      - run: |
+          ${{ matrix.install }} ./sealctl-*.rpm
+          sealctl --version
+          sealctl --help | grep -q volume
+          test -f /usr/share/bash-completion/completions/sealctl
+          rpm -qi sealctl | head -5
+
+  arch:
+    name: makepkg (archlinux)
+    needs: linux
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist
+      - run: |
+          pacman -Syu --noconfirm --needed base-devel systemd-libs dbus
+          useradd -m builder
+          mkdir /build && cp dist/*.tar.gz /build/
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          scripts/render-pkgbuild.sh "$VERSION" local dist > /build/PKGBUILD
+          chown -R builder /build
+          su builder -c 'cd /build && makepkg --noconfirm'
+          pacman -U --noconfirm /build/sealctl-bin-*.pkg.tar.zst
+          sealctl --version
+          test -f /usr/share/zsh/site-functions/_sealctl
+
+  homebrew:
+    name: brew install (macOS)
+    needs: macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos
+          path: dist
+      - name: Formula from local tarballs
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          # linux shas aren't needed on macOS; placeholders keep the formula valid
+          for t in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+            echo "0000000000000000000000000000000000000000000000000000000000000000  x" > "dist/sealctl-$VERSION-$t.tar.gz.sha256"
+          done
+          brew tap-new --no-git local/sealctl
+          scripts/render-formula.sh "$VERSION" "file://$PWD/dist" dist \
+            > "$(brew --repository local/sealctl)/Formula/sealctl.rb"
+          brew install local/sealctl/sealctl
+          brew test local/sealctl/sealctl
+          sealctl --version
+
+  nix:
+    name: nix build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: |
+          nix build --print-build-logs .#sealctl
+          ./result/bin/sealctl --version
+
+  # -------------------------------------------------------------- publish ----
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [deb, rpm, arch, homebrew, nix]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Check tag matches Cargo version
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$VERSION" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$VERSION"; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: PKGBUILD and checksums
+        run: |
+          BASE="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          scripts/render-pkgbuild.sh "$VERSION" "$BASE" dist > dist/PKGBUILD
+          cd dist && sha256sum *.tar.gz *.deb *.rpm PKGBUILD > SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "sealctl $GITHUB_REF_NAME" --generate-notes \
+            dist/*.tar.gz dist/*.tar.gz.sha256 dist/*.deb dist/*.rpm dist/PKGBUILD dist/SHA256SUMS
+
+  tap:
+    name: update Homebrew tap
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: actions/checkout@v4
+        with:
+          repository: oleksiyp/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
+      - run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BASE="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          mkdir -p tap/Formula
+          scripts/render-formula.sh "$VERSION" "$BASE" dist > tap/Formula/sealctl.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/sealctl.rb
+          git commit -m "sealctl $VERSION" && git push

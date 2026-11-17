@@ -35,3 +35,44 @@ rpassword = "7"
 
 [dev-dependencies]
 tempfile = "3"
+
+# ---- Linux packages (built on CI: cargo deb / cargo generate-rpm) ----
+# Shell completions are generated into crates/sealctl/completions/ before packaging.
+
+[package.metadata.deb]
+maintainer = "Oleksiy Pylypenko"
+copyright = "2026 Oleksiy Pylypenko and sealctl contributors"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+sealctl uses the OpenPGP application on a Ledger hardware wallet, over USB or Bluetooth, \
+to unlock encrypted LUKS volumes, back them up with restic, keep API keys out of .env files, \
+and sign SSH logins and git commits. Private keys never leave the device."""
+section = "utils"
+priority = "optional"
+depends = "$auto"
+recommends = "restic, cryptsetup"
+suggests = "git, openssh-client"
+assets = [
+    ["target/release/sealctl", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/sealctl/README.md", "644"],
+    ["completions/sealctl.bash", "usr/share/bash-completion/completions/sealctl", "644"],
+    ["completions/_sealctl", "usr/share/zsh/vendor-completions/_sealctl", "644"],
+    ["completions/sealctl.fish", "usr/share/fish/vendor_completions.d/sealctl.fish", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Hardware-wallet backed encryption: volumes, backups, secrets, SSH"
+license = "MIT"
+url = "https://github.com/oleksiyp/sealctl"
+assets = [
+    { source = "target/release/sealctl", dest = "/usr/bin/sealctl", mode = "755" },
+    { source = "../../LICENSE", dest = "/usr/share/licenses/sealctl/LICENSE", mode = "644", doc = true },
+    { source = "../../README.md", dest = "/usr/share/doc/sealctl/README.md", mode = "644", doc = true },
+    { source = "completions/sealctl.bash", dest = "/usr/share/bash-completion/completions/sealctl", mode = "644" },
+    { source = "completions/_sealctl", dest = "/usr/share/zsh/site-functions/_sealctl", mode = "644" },
+    { source = "completions/sealctl.fish", dest = "/usr/share/fish/vendor_completions.d/sealctl.fish", mode = "644" },
+]
+
+[package.metadata.generate-rpm.recommends]
+restic = "*"
+cryptsetup = "*"

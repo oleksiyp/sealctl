@@ -22,11 +22,21 @@ SSH logins and git commits. Private keys never leave the device.
 
 ## Install
 
-```sh
-cargo install --git https://github.com/oleksiyp/sealctl sealctl
-brew install restic            # or: apt install restic   (for backups)
-```
-Linux needs `libudev-dev libdbus-1-dev pkg-config` to build, and `cryptsetup` for volumes.
+| | |
+|---|---|
+| macOS / Linuxbrew | `brew install oleksiyp/tap/sealctl` |
+| Debian / Ubuntu | `sudo apt install ./sealctl_<version>_<arch>.deb` from [Releases](https://github.com/oleksiyp/sealctl/releases) |
+| Fedora / RHEL 9 / Rocky | `sudo dnf install ./sealctl-<version>.<arch>.rpm` |
+| openSUSE | `sudo zypper install --allow-unsigned-rpm ./sealctl-<version>.<arch>.rpm` |
+| Arch Linux | `PKGBUILD` in each release (AUR: `sealctl-bin`) |
+| Nix | `nix run github:oleksiyp/sealctl` / `nix profile install github:oleksiyp/sealctl` |
+| From source | `cargo install --git https://github.com/oleksiyp/sealctl sealctl` |
+
+Linux binaries are built on Debian 11 (glibc 2.31) for x86_64 and aarch64 and are
+install-tested on Debian 11/12, Ubuntu 22.04/24.04, Fedora, Rocky 9, openSUSE Tumbleweed and
+Arch on every commit. Backups need [restic](https://restic.net) (`brew`/`apt`/`dnf install
+restic`), Linux volumes need `cryptsetup`. Building from source on Linux needs
+`libudev-dev libdbus-1-dev pkg-config`.
 
 **Device:** install the **OpenPGP** app (Ledger Live → Settings → Experimental → Developer mode).
 For **Bluetooth**, install the Bluetooth-enabled build instead — see
