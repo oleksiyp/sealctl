@@ -44,14 +44,15 @@ Linux needs `libudev-dev` and `libdbus-1-dev` to build.
 sealctl devices                 # list Ledgers on USB and Bluetooth
 sealctl status                  # OpenPGP card state (keys, fingerprints, PIN retries)
 sealctl -t ble status           # force Bluetooth;  -t usb forces USB
+sealctl setup --uid "Jane Doe <jane@example.org>"   # one-time: create seed-derived keys
 ```
 
 ## Roadmap
 
 - [x] USB-HID and Bluetooth transports as an `openpgp-card` backend
 - [x] `devices`, `status`
-- [ ] `setup`: configure the OpenPGP app (Curve25519, seeded keys, fixed creation time), export
-      certificate, recovery kit
+- [x] `setup`: configure the OpenPGP app (Curve25519, seeded keys, fixed creation time), certificate
+- [ ] recovery kit export
 - [ ] `doctor`: verify the certificate can be reproduced from the device and a test decryption works
 - [ ] `encrypt` / `decrypt`
 - [ ] Volumes: `create`, `unlock`, `lock` (APFS on macOS, LUKS2 on Linux)

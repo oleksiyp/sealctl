@@ -1,6 +1,7 @@
 //! sealctl — hardware-wallet backed encryption for everyday developer use.
 
 mod card;
+mod setup;
 
 use std::time::Duration;
 
@@ -52,6 +53,16 @@ enum Cmd {
     Devices,
     /// Show the OpenPGP card state of the connected Ledger (read-only).
     Status,
+    /// Configure the OpenPGP app: Curve25519, seed-derived keys, fixed creation time,
+    /// self-signed certificate (writes to the device; admin + user PIN on the Ledger).
+    Setup {
+        /// OpenPGP User ID, e.g. "Jane Doe <jane@example.org>".
+        #[arg(long)]
+        uid: Option<String>,
+        /// Regenerate keys even if the card already has some.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -69,5 +80,6 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Devices => card::devices(cli.transport.into(), scan),
         Cmd::Status => card::status(cli.transport.into(), scan),
+        Cmd::Setup { uid, force } => setup::setup(cli.transport.into(), scan, uid, force),
     }
 }
