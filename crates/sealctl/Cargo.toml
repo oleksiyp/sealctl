@@ -1,0 +1,21 @@
+[package]
+name = "sealctl"
+description = "Hardware-wallet backed encryption for everyday developer use: volumes, backups, secrets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+keywords = ["openpgp", "ledger", "encryption", "smartcard", "cli"]
+categories = ["command-line-utilities", "cryptography"]
+
+[dependencies]
+sealctl-ledger = { path = "../sealctl-ledger" }
+anyhow.workspace = true
+log.workspace = true
+openpgp-card.workspace = true
+clap.workspace = true
+env_logger.workspace = true
+chrono.workspace = true
