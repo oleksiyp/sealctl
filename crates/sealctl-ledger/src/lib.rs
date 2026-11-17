@@ -82,6 +82,22 @@ pub fn running_app(t: &mut dyn Exchange) -> Result<(String, String)> {
     Ok((name, version))
 }
 
+/// Ask the dashboard to launch an app by name (the user confirms on the device).
+/// The link resets afterwards; reconnect to talk to the app.
+pub fn open_app(t: &mut dyn Exchange, name: &str) -> Result<()> {
+    let n = name.as_bytes();
+    let mut apdu = vec![0xe0, 0xd8, 0x00, 0x00, n.len() as u8];
+    apdu.extend_from_slice(n);
+    let r = t.exchange(&apdu)?;
+    let sw = &r[r.len().saturating_sub(2)..];
+    match sw {
+        [0x90, 0x00] => Ok(()),
+        [0x55, 0x01] | [0x69, 0x85] => Err(anyhow!("opening {name} was rejected on the device")),
+        [0x68, 0x07] => Err(anyhow!("{name} is not installed on the device")),
+        _ => Err(anyhow!("opening {name} failed: {}", hex(sw))),
+    }
+}
+
 pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }

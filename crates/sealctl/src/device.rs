@@ -18,8 +18,45 @@ impl Ctx {
     /// Connect, check that the OpenPGP app is running, and open it as an OpenPGP card.
     pub fn open_card(&self) -> Result<Card<Open>> {
         let mut t = sealctl_ledger::open(self.select, self.scan)?;
-        let kind = t.kind();
-        let (app, version) = sealctl_ledger::running_app(t.as_mut()).map_err(explain)?;
+        let mut kind = t.kind();
+        let (mut app, mut version) = sealctl_ledger::running_app(t.as_mut()).map_err(explain)?;
+
+        // On the dashboard: ask the device to open OpenPGP (confirmed on the Ledger), then
+        // reconnect — launching an app resets the USB/Bluetooth link.
+        if app == "BOLOS" && std::env::var_os("SEALCTL_NO_AUTO_OPEN").is_none() {
+            eprintln!("👉 Opening the OpenPGP app — confirm on the Ledger if asked");
+            match sealctl_ledger::open_app(t.as_mut(), "OpenPGP") {
+                Ok(()) => {
+                    drop(t);
+                    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                    let mut last_err;
+                    loop {
+                        std::thread::sleep(Duration::from_millis(1500));
+                        // reconnect over the same transport that worked
+                        let sel = match kind {
+                            TransportKind::Usb => Select::Usb,
+                            TransportKind::Ble => Select::Ble,
+                        };
+                        match sealctl_ledger::open(sel, self.scan.min(Duration::from_secs(15)))
+                            .and_then(|mut t2| sealctl_ledger::running_app(t2.as_mut()).map(|a| (t2, a)))
+                        {
+                            Ok((t2, (a, v))) if a == "OpenPGP" => {
+                                t = t2;
+                                kind = t.kind();
+                                (app, version) = (a, v);
+                                break;
+                            }
+                            Ok((_, (a, _))) => last_err = anyhow::anyhow!("device is on {a}"),
+                            Err(e) => last_err = e,
+                        }
+                        if std::time::Instant::now() > deadline {
+                            bail!("couldn't reconnect after opening OpenPGP: {last_err:#}");
+                        }
+                    }
+                }
+                Err(e) => log::info!("auto-open failed: {e:#}"),
+            }
+        }
         if app != "OpenPGP" {
             let place = if app == "BOLOS" {
                 "its dashboard".to_string()
