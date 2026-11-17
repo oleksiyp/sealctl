@@ -61,7 +61,7 @@ pub fn status(select: Select, scan: Duration) -> Result<()> {
     let aid = tx.application_identifier()?;
     println!(
         "Card:        {} serial {:08X}, OpenPGP card v{}.{}",
-        aid.manufacturer_name(),
+        manufacturer(aid.manufacturer(), aid.manufacturer_name()),
         aid.serial(),
         aid.version() >> 8,
         aid.version() & 0xff
@@ -116,4 +116,12 @@ pub fn status(select: Select, scan: Duration) -> Result<()> {
         pws.err_count_pw3()
     );
     Ok(())
+}
+
+/// openpgp-card's vendor table doesn't know Ledger's id yet.
+fn manufacturer(id: u16, name: &'static str) -> &'static str {
+    match id {
+        0x2c97 => "Ledger",
+        _ => name,
+    }
 }

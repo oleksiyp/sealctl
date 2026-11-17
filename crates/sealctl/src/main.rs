@@ -57,7 +57,8 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(match cli.verbose {
-        0 => "warn",
+        // btleplug logs a spurious error on macOS disconnect; hide it unless verbose
+        0 => "warn,btleplug=off",
         1 => "debug",
         _ => "trace",
     }))

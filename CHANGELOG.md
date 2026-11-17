@@ -9,4 +9,4 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Added
 - Ledger USB-HID and Bluetooth LE transports implementing the `openpgp-card` `CardBackend`
   (on-device PIN entry via the OpenPGP app's PIN-pad mode).
-- `sealctl devices` and `sealctl status`.
+- `sealctl devices` and `sealctl status` (verified on Ledger Flex over Bluetooth).
