@@ -87,4 +87,7 @@ fn secret_store_uses_seed_derived_key() {
     }
     sealctl::secrets::remove("github").unwrap();
     assert_eq!(sealctl::secrets::list().unwrap(), vec!["work/openai"]);
+    sealctl::secrets::remove("work/openai").unwrap();
+    assert!(!dir.join("work").exists(), "empty folder removed");
+    assert!(dir.exists(), "store root kept");
 }

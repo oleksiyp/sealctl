@@ -166,8 +166,17 @@ pub fn list() -> Result<Vec<String>> {
 
 pub fn remove(name: &str) -> Result<()> {
     validate(name)?;
-    let p = path_of(&store_dir()?, name);
+    let dir = store_dir()?;
+    let p = path_of(&dir, name);
     fs::remove_file(&p).with_context(|| format!("secret {name} not found"))?;
+    // drop folders that became empty (e.g. work/ after removing work/token)
+    let mut parent = p.parent();
+    while let Some(d) = parent {
+        if d == dir || fs::remove_dir(d).is_err() {
+            break; // not empty, or the store root
+        }
+        parent = d.parent();
+    }
     Ok(())
 }
 
